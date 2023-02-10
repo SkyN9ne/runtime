@@ -1509,6 +1509,7 @@ public:
     bool isCommutativeHWIntrinsic() const;
     bool isContainableHWIntrinsic() const;
     bool isRMWHWIntrinsic(Compiler* comp);
+    bool isEvexCompatibleHWIntrinsic();
 #else
     bool isCommutativeHWIntrinsic() const
     {
@@ -1521,6 +1522,11 @@ public:
     }
 
     bool isRMWHWIntrinsic(Compiler* comp)
+    {
+        return false;
+    }
+
+    bool isEvexCompatibleHWIntrinsic()
     {
         return false;
     }
@@ -1984,6 +1990,8 @@ public:
     bool IsFieldAddr(Compiler* comp, GenTree** pBaseAddr, FieldSeq** pFldSeq, ssize_t* pOffset);
 
     bool IsArrayAddr(GenTreeArrAddr** pArrAddr);
+
+    bool SupportsSettingZeroFlag();
 
     // These are only used for dumping.
     // The GetRegNum() is only valid in LIR, but the dumping methods are not easily
@@ -3794,6 +3802,8 @@ public:
     unsigned int GetFieldCount(Compiler* compiler) const;
     var_types GetFieldTypeByIndex(Compiler* compiler, unsigned idx);
 
+    bool IsNeverNegative(Compiler* comp) const;
+
     //-------------------------------------------------------------------
     // clearOtherRegFlags: clear GTF_* flags associated with gtOtherRegs
     //
@@ -4004,13 +4014,22 @@ struct GenTreeField : public GenTreeUnOp
 {
     CORINFO_FIELD_HANDLE gtFldHnd;
     DWORD                gtFldOffset;
-    bool                 gtFldMayOverlap;
+    bool                 gtFldMayOverlap : 1;
+
+private:
+    bool gtFldIsSpanLength : 1;
+
+public:
 #ifdef FEATURE_READYTORUN
     CORINFO_CONST_LOOKUP gtFieldLookup;
 #endif
 
     GenTreeField(genTreeOps oper, var_types type, GenTree* obj, CORINFO_FIELD_HANDLE fldHnd, DWORD offs)
-        : GenTreeUnOp(oper, type, obj), gtFldHnd(fldHnd), gtFldOffset(offs), gtFldMayOverlap(false)
+        : GenTreeUnOp(oper, type, obj)
+        , gtFldHnd(fldHnd)
+        , gtFldOffset(offs)
+        , gtFldMayOverlap(false)
+        , gtFldIsSpanLength(false)
     {
 #ifdef FEATURE_READYTORUN
         gtFieldLookup.addr = nullptr;
@@ -4035,6 +4054,24 @@ struct GenTreeField : public GenTreeUnOp
     {
         assert(((gtFlags & GTF_FLD_VOLATILE) == 0) || OperIs(GT_FIELD));
         return (gtFlags & GTF_FLD_VOLATILE) != 0;
+    }
+
+    bool IsSpanLength() const
+    {
+        // This is limited to span length today rather than a more general "IsNeverNegative"
+        // to help avoid confusion around propagating the value to promoted lcl vars.
+        //
+        // Extending this support more in the future will require additional work and
+        // considerations to help ensure it is correctly used since people may want
+        // or intend to use this as more of a "point in time" feature like GTF_IND_NONNULL
+
+        assert(OperIs(GT_FIELD));
+        return gtFldIsSpanLength;
+    }
+
+    void SetIsSpanLength(bool value)
+    {
+        gtFldIsSpanLength = value;
     }
 
     bool IsInstance() const
@@ -9289,21 +9326,21 @@ inline void GenTree::SetRegSpillFlagByIdx(GenTreeFlags flags, int regIndex)
 // GetLastUseBit: Get the last use bit for regIndex
 //
 // Arguments:
-//     regIndex - the register index
+//     fieldIndex - the field index
 //
 // Return Value:
-//     The bit to set, clear or query for the last-use of the regIndex'th value.
+//     The bit to set, clear or query for the last-use of the fieldIndex'th value.
 //
 // Notes:
 //     This must be a GenTreeLclVar or GenTreeCopyOrReload node.
 //
-inline GenTreeFlags GenTree::GetLastUseBit(int regIndex) const
+inline GenTreeFlags GenTree::GetLastUseBit(int fieldIndex) const
 {
-    assert(regIndex < 4);
+    assert(fieldIndex < 4);
     assert(OperIs(GT_LCL_VAR, GT_STORE_LCL_VAR, GT_LCL_VAR_ADDR, GT_LCL_FLD, GT_STORE_LCL_FLD, GT_LCL_FLD_ADDR, GT_COPY,
                   GT_RELOAD));
     static_assert_no_msg((1 << FIELD_LAST_USE_SHIFT) == GTF_VAR_FIELD_DEATH0);
-    return (GenTreeFlags)(1 << (FIELD_LAST_USE_SHIFT + regIndex));
+    return (GenTreeFlags)(1 << (FIELD_LAST_USE_SHIFT + fieldIndex));
 }
 
 //-----------------------------------------------------------------------------------
@@ -9336,6 +9373,8 @@ inline bool GenTree::IsLastUse(int fieldIndex) const
 //
 inline bool GenTree::HasLastUse() const
 {
+    assert(OperIs(GT_LCL_VAR, GT_STORE_LCL_VAR, GT_LCL_VAR_ADDR, GT_LCL_FLD, GT_STORE_LCL_FLD, GT_LCL_FLD_ADDR, GT_COPY,
+                  GT_RELOAD));
     return (gtFlags & (GTF_VAR_DEATH_MASK)) != 0;
 }
 
@@ -9343,28 +9382,28 @@ inline bool GenTree::HasLastUse() const
 // SetLastUse: Set the last use bit for the given index
 //
 // Arguments:
-//     regIndex - the index
+//     fieldIndex - the index
 //
 // Notes:
 //     This must be a GenTreeLclVar or GenTreeCopyOrReload node.
 //
-inline void GenTree::SetLastUse(int index)
+inline void GenTree::SetLastUse(int fieldIndex)
 {
-    gtFlags |= GetLastUseBit(index);
+    gtFlags |= GetLastUseBit(fieldIndex);
 }
 
 //-----------------------------------------------------------------------------------
 // ClearLastUse: Clear the last use bit for the given index
 //
 // Arguments:
-//     regIndex - the register index
+//     fieldIndex - the index
 //
 // Notes:
 //     This must be a GenTreeLclVar or GenTreeCopyOrReload node.
 //
-inline void GenTree::ClearLastUse(int regIndex)
+inline void GenTree::ClearLastUse(int fieldIndex)
 {
-    gtFlags &= ~GetLastUseBit(regIndex);
+    gtFlags &= ~GetLastUseBit(fieldIndex);
 }
 
 //-------------------------------------------------------------------------
