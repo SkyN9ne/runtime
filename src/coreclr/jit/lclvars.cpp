@@ -52,9 +52,8 @@ void Compiler::lvaInit()
     lvaInlinedPInvokeFrameVar = BAD_VAR_NUM;
     lvaReversePInvokeFrameVar = BAD_VAR_NUM;
 #if FEATURE_FIXED_OUT_ARGS
-    lvaPInvokeFrameRegSaveVar = BAD_VAR_NUM;
-    lvaOutgoingArgSpaceVar    = BAD_VAR_NUM;
-    lvaOutgoingArgSpaceSize   = PhasedVar<unsigned>();
+    lvaOutgoingArgSpaceVar  = BAD_VAR_NUM;
+    lvaOutgoingArgSpaceSize = PhasedVar<unsigned>();
 #endif // FEATURE_FIXED_OUT_ARGS
 #ifdef JIT32_GCENCODER
     lvaLocAllocSPvar = BAD_VAR_NUM;
@@ -856,12 +855,12 @@ void Compiler::lvaInitUserArgs(InitVarDscInfo* varDscInfo, unsigned skipArgs, un
             if ((floatFlags & STRUCT_FLOAT_FIELD_ONLY_ONE) != 0)
             {
                 assert(argSize <= 8);
-                assert(varDsc->lvExactSize <= argSize);
+                assert(varDsc->lvExactSize() <= argSize);
 
                 floatNum              = 1;
                 canPassArgInRegisters = varDscInfo->canEnreg(TYP_DOUBLE, 1);
 
-                argRegTypeInStruct1 = (varDsc->lvExactSize == 8) ? TYP_DOUBLE : TYP_FLOAT;
+                argRegTypeInStruct1 = (varDsc->lvExactSize() == 8) ? TYP_DOUBLE : TYP_FLOAT;
             }
             else if ((floatFlags & STRUCT_FLOAT_FIELD_ONLY_TWO) != 0)
             {
@@ -1768,6 +1767,11 @@ bool Compiler::StructPromotionHelper::CanPromoteStructType(CORINFO_CLASS_HANDLE 
 
     bool overlappingFields = StructHasOverlappingFields(typeFlags);
     if (overlappingFields)
+    {
+        return false;
+    }
+
+    if (StructHasIndexableFields(typeFlags))
     {
         return false;
     }
@@ -3841,18 +3845,6 @@ void Compiler::lvaSortByRefCount()
 #endif
 }
 
-/*****************************************************************************
- *
- *  This is called by lvaMarkLclRefs to disqualify a variable from being
- *  considered by optAddCopies()
- */
-void LclVarDsc::lvaDisqualifyVar()
-{
-    this->lvDisqualify = true;
-    this->lvSingleDef  = false;
-    this->lvDefStmt    = nullptr;
-}
-
 #ifdef FEATURE_SIMD
 var_types LclVarDsc::GetSimdBaseType() const
 {
@@ -4292,9 +4284,6 @@ void Compiler::lvaMarkLclRefs(GenTree* tree, BasicBlock* block, Statement* stmt,
 
         if (tree->gtOper == GT_LCL_FLD)
         {
-            // variables that have uses inside a GT_LCL_FLD
-            // cause problems, so we will disqualify them here
-            varDsc->lvaDisqualifyVar();
             return;
         }
 
@@ -4304,42 +4293,6 @@ void Compiler::lvaMarkLclRefs(GenTree* tree, BasicBlock* block, Statement* stmt,
         }
 
         /* Record if the variable has a single def or not */
-
-        if (!varDsc->lvDisqualify) // If this variable is already disqualified, we can skip this
-        {
-            if (tree->gtFlags & GTF_VAR_DEF) // Is this is a def of our variable
-            {
-                /*
-                   If we have one of these cases:
-                       1.    We have already seen a definition (i.e lvSingleDef is true)
-                       2. or info.CompInitMem is true (thus this would be the second definition)
-                       3. or we have an assignment inside QMARK-COLON trees
-                       4. or we have an update form of assignment (i.e. +=, -=, *=)
-                   Then we must disqualify this variable for use in optAddCopies()
-
-                   Note that all parameters start out with lvSingleDef set to true
-                */
-                if ((varDsc->lvSingleDef == true) || (info.compInitMem == true) || (tree->gtFlags & GTF_COLON_COND) ||
-                    (tree->gtFlags & GTF_VAR_USEASG))
-                {
-                    varDsc->lvaDisqualifyVar();
-                }
-                else
-                {
-                    varDsc->lvSingleDef = true;
-                    varDsc->lvDefStmt   = stmt;
-                }
-            }
-            else // otherwise this is a ref of our variable
-            {
-                if (BlockSetOps::MayBeUninit(varDsc->lvRefBlks))
-                {
-                    // Lazy initialization
-                    BlockSetOps::AssignNoCopy(this, varDsc->lvRefBlks, BlockSetOps::MakeEmpty(this));
-                }
-                BlockSetOps::AddElemD(this, varDsc->lvRefBlks, block->bbNum);
-            }
-        }
 
         if (!varDsc->lvDisqualifySingleDefRegCandidate) // If this var is already disqualified, we can skip this
         {
