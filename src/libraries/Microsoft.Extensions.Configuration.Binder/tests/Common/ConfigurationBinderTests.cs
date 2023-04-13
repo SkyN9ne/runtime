@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using Microsoft.Extensions.Configuration;
@@ -424,7 +425,7 @@ namespace Microsoft.Extensions
                 getValueException.Message);
         }
 
-        [ConditionalFact(typeof(TestHelpers), nameof(TestHelpers.NotSourceGenMode))] // Ensure exception messages are in sync
+        [Fact]
         public void ExceptionOnFailedBindingIncludesPath()
         {
             const string IncorrectValue = "Invalid data";
@@ -1255,7 +1256,6 @@ namespace Microsoft.Extensions
             var configurationBuilder = new ConfigurationBuilder();
             configurationBuilder.AddInMemoryCollection(dic);
             var config = configurationBuilder.Build();
-
             var options = config.Get<ByteArrayOptions>();
             Assert.Equal(bytes, options.MyByteArray);
         }
@@ -1275,7 +1275,7 @@ namespace Microsoft.Extensions
             Assert.Null(options.MyByteArray);
         }
 
-        [ConditionalFact(typeof(TestHelpers), nameof(TestHelpers.NotSourceGenMode))] // Ensure exception messages are in sync
+        [Fact]
         public void ExceptionWhenTryingToBindToByteArray()
         {
             var dic = new Dictionary<string, string>
@@ -1433,6 +1433,142 @@ namespace Microsoft.Extensions
 
             Assert.Equal(401, options.HttpStatusCode); // exists in configuration and properly sets the property
             Assert.Equal(2, options.OtherCode); // doesn't exist in configuration. the setter sets default value '2'
+        }
+
+        [Fact]
+        public void RecursiveTypeGraphs_DirectRef()
+        {
+            var data = @"{
+                ""MyString"":""Hello"",
+                ""MyClass"": {
+                    ""MyString"": ""World"",
+                    ""MyClass"": {
+                        ""MyString"": ""World"",
+                        ""MyClass"": null
+                    }
+                }
+            }";
+
+            var configuration = new ConfigurationBuilder()
+                .AddJsonStream(TestStreamHelpers.StringToStream(data))
+                .Build();
+
+            var obj = configuration.Get<ClassWithDirectSelfReference>();
+            Assert.Equal("Hello", obj.MyString);
+
+            var nested = obj.MyClass;
+            Assert.Equal("World", nested.MyString);
+
+            var deeplyNested = nested.MyClass;
+            Assert.Equal("World", deeplyNested.MyString);
+            Assert.Null(deeplyNested.MyClass);
+        }
+
+        [Fact]
+        public void RecursiveTypeGraphs_IndirectRef()
+        {
+            var data = @"{
+                ""MyString"":""Hello"",
+                ""MyList"": [{
+                    ""MyString"": ""World"",
+                    ""MyList"": [{
+                        ""MyString"": ""World"",
+                        ""MyClass"": null
+                    }]
+                }]
+            }";
+
+            var configuration = new ConfigurationBuilder()
+                .AddJsonStream(TestStreamHelpers.StringToStream(data))
+                .Build();
+
+            var obj = configuration.Get<ClassWithIndirectSelfReference>();
+            Assert.Equal("Hello", obj.MyString);
+
+            var nested = obj.MyList[0];
+            Assert.Equal("World", nested.MyString);
+
+            var deeplyNested = nested.MyList[0];
+            Assert.Equal("World", deeplyNested.MyString);
+            Assert.Null(deeplyNested.MyList);
+        }
+
+        [Fact]
+        public void TypeWithPrimitives_Pass()
+        {
+            var data = @"{
+                ""Prop0"": true,
+                ""Prop1"": 1,
+                ""Prop2"": 2,
+                ""Prop3"": ""C"",
+                ""Prop4"": 3.2,
+                ""Prop5"": ""Hello, world!"",
+                ""Prop6"": 4,
+                ""Prop8"": 9,
+                ""Prop9"": 7,
+                ""Prop10"": 2.3,
+                ""Prop13"": 5,
+                ""Prop14"": 10,
+                ""Prop15"": 11,
+                ""Prop16"": ""obj always parsed as string"",
+                ""Prop17"": ""yo-NG"",
+                ""Prop19"": ""2023-03-29T18:23:43.9977489+00:00"",
+                ""Prop20"": ""2023-03-29T18:21:22.8046981+00:00"",
+                ""Prop21"": 5.3,
+                ""Prop23"": ""10675199.02:48:05.4775807"",
+                ""Prop24"": ""e905a75b-d195-494d-8938-e55dcee44574"",
+                ""Prop25"": ""https://microsoft.com"",
+                ""Prop26"": ""4.3.2.1"",
+            }";
+
+            var configuration = TestHelpers.GetConfigurationFromJsonString(data);
+            var obj = configuration.Get<RecordWithPrimitives>();
+
+            Assert.True(obj.Prop0);
+            Assert.Equal(1, obj.Prop1);
+            Assert.Equal(2, obj.Prop2);
+            Assert.Equal('C', obj.Prop3);
+            Assert.Equal(3.2, obj.Prop4);
+            Assert.Equal("Hello, world!", obj.Prop5);
+            Assert.Equal(4, obj.Prop6);
+            Assert.Equal(9, obj.Prop8);
+            Assert.Equal(7, obj.Prop9);
+            Assert.Equal((float)2.3, obj.Prop10);
+            Assert.Equal(5, obj.Prop13);
+            Assert.Equal((uint)10, obj.Prop14);
+            Assert.Equal((ulong)11, obj.Prop15);
+            Assert.Equal("obj always parsed as string", obj.Prop16);
+            Assert.Equal(CultureInfo.GetCultureInfoByIetfLanguageTag("yo-NG"), obj.Prop17);
+            Assert.Equal(DateTime.Parse("2023-03-29T18:23:43.9977489+00:00", CultureInfo.InvariantCulture), obj.Prop19);
+            Assert.Equal(DateTimeOffset.Parse("2023-03-29T18:21:22.8046981+00:00", CultureInfo.InvariantCulture), obj.Prop20);
+            Assert.Equal((decimal)5.3, obj.Prop21);
+            Assert.Equal(TimeSpan.Parse("10675199.02:48:05.4775807", CultureInfo.InvariantCulture), obj.Prop23);
+            Assert.Equal(Guid.Parse("e905a75b-d195-494d-8938-e55dcee44574"), obj.Prop24);
+            Uri.TryCreate("https://microsoft.com", UriKind.RelativeOrAbsolute, out Uri? value);
+            Assert.Equal(value, obj.Prop25);
+#if BUILDING_SOURCE_GENERATOR_TESTS
+            Assert.Equal(Version.Parse("4.3.2.1"), obj.Prop26);
+#endif
+            Assert.Equal(CultureInfo.GetCultureInfo("yo-NG"), obj.Prop17);
+
+#if NETCOREAPP
+            data = @"{
+                ""Prop7"": 9,
+                ""Prop11"": 65500,
+                ""Prop12"": 34,
+                ""Prop18"": ""2002-03-22"",
+                ""Prop22"": ""18:26:38.7327436"",
+            }";
+
+            configuration = TestHelpers.GetConfigurationFromJsonString(data);
+            configuration.Bind(obj);
+
+            Assert.Equal((Int128)9, obj.Prop7);
+            Assert.Equal((Half)65500, obj.Prop11);
+            Assert.Equal((UInt128)34, obj.Prop12);
+            Assert.Equal(DateOnly.Parse("2002-03-22"), obj.Prop18);
+            Assert.Equal(TimeOnly.Parse("18:26:38.7327436"), obj.Prop22);
+#endif
         }
     }
 }
