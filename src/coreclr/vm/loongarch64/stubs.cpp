@@ -952,12 +952,6 @@ PTR_CONTEXT GetCONTEXTFromRedirectedStubStackFrame(T_CONTEXT * pContext)
     return *ppContext;
 }
 
-void RedirectForThreadAbort()
-{
-    // ThreadAbort is not supported in .net core
-    throw "NYI";
-}
-
 #if !defined(DACCESS_COMPILE)
 FaultingExceptionFrame *GetFrameFromRedirectedStubStackFrame (DISPATCHER_CONTEXT *pDispatcherContext)
 {
@@ -985,10 +979,9 @@ AdjustContextForVirtualStub(
 
     PCODE f_IP = GetIP(pContext);
 
-    VirtualCallStubManager::StubKind sk;
-    VirtualCallStubManager::FindStubManager(f_IP, &sk);
+    StubCodeBlockKind sk = RangeSectionStubManager::GetStubKind(f_IP);
 
-    if (sk == VirtualCallStubManager::SK_DISPATCH)
+    if (sk == STUB_CODE_BLOCK_VSD_DISPATCH_STUB)
     {
         if (*PTR_DWORD(f_IP - 4) != DISPATCH_STUB_FIRST_DWORD)
         {
@@ -997,7 +990,7 @@ AdjustContextForVirtualStub(
         }
     }
     else
-    if (sk == VirtualCallStubManager::SK_RESOLVE)
+    if (sk == STUB_CODE_BLOCK_VSD_RESOLVE_STUB)
     {
         if (*PTR_DWORD(f_IP) != RESOLVE_STUB_FIRST_DWORD)
         {

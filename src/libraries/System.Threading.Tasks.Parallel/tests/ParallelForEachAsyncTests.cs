@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using Xunit;
 
@@ -23,8 +24,13 @@ namespace System.Threading.Tasks.Tests
             AssertExtensions.Throws<ArgumentNullException>("source", () => { Parallel.ForEachAsync((IAsyncEnumerable<int>)null, CancellationToken.None, (item, cancellationToken) => default); });
             AssertExtensions.Throws<ArgumentNullException>("source", () => { Parallel.ForEachAsync((IAsyncEnumerable<int>)null, new ParallelOptions(), (item, cancellationToken) => default); });
 
+            AssertExtensions.Throws<ArgumentNullException>("parallelOptions", () => { Parallel.ForAsync(1, 10, null, (item, cancellationToken) => default); });
             AssertExtensions.Throws<ArgumentNullException>("parallelOptions", () => { Parallel.ForEachAsync(Enumerable.Range(1, 10), null, (item, cancellationToken) => default); });
             AssertExtensions.Throws<ArgumentNullException>("parallelOptions", () => { Parallel.ForEachAsync(EnumerableRangeAsync(1, 10), null, (item, cancellationToken) => default); });
+
+            AssertExtensions.Throws<ArgumentNullException>("body", () => { Parallel.ForAsync(1, 10, null); });
+            AssertExtensions.Throws<ArgumentNullException>("body", () => { Parallel.ForAsync(1, 10, CancellationToken.None, null); });
+            AssertExtensions.Throws<ArgumentNullException>("body", () => { Parallel.ForAsync(1, 10, new ParallelOptions(), null); });
 
             AssertExtensions.Throws<ArgumentNullException>("body", () => { Parallel.ForEachAsync(Enumerable.Range(1, 10), null); });
             AssertExtensions.Throws<ArgumentNullException>("body", () => { Parallel.ForEachAsync(Enumerable.Range(1, 10), CancellationToken.None, null); });
@@ -54,9 +60,11 @@ namespace System.Threading.Tasks.Tests
                 return default;
             };
 
+            AssertCanceled(Parallel.ForAsync(1, 10, cts.Token, body));
             AssertCanceled(Parallel.ForEachAsync(MarkStart(box), cts.Token, body));
             AssertCanceled(Parallel.ForEachAsync(MarkStartAsync(box), cts.Token, body));
 
+            AssertCanceled(Parallel.ForAsync(1, 10, new ParallelOptions { CancellationToken = cts.Token }, body));
             AssertCanceled(Parallel.ForEachAsync(MarkStart(box), new ParallelOptions { CancellationToken = cts.Token }, body));
             AssertCanceled(Parallel.ForEachAsync(MarkStartAsync(box), new ParallelOptions { CancellationToken = cts.Token }, body));
 
@@ -77,6 +85,39 @@ namespace System.Threading.Tasks.Tests
 
                 await Task.Yield();
             }
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [InlineData(-1)]
+        [InlineData(1)]
+        [InlineData(2)]
+        [InlineData(4)]
+        [InlineData(128)]
+        public async Task Dop_WorkersCreatedRespectingLimit_For(int dop)
+        {
+            bool exit = false;
+
+            int activeWorkers = 0;
+            var block = new TaskCompletionSource();
+
+            Task t = Parallel.ForAsync(long.MinValue, long.MaxValue, new ParallelOptions { MaxDegreeOfParallelism = dop }, async (item, cancellationToken) =>
+            {
+                Interlocked.Increment(ref activeWorkers);
+                await block.Task;
+                if (Volatile.Read(ref exit))
+                {
+                    throw new FormatException();
+                }
+            });
+            Assert.False(t.IsCompleted);
+
+            await Task.Delay(20); // give the loop some time to run
+
+            Volatile.Write(ref exit, true);
+            block.SetResult();
+            await Assert.ThrowsAsync<FormatException>(() => t);
+
+            Assert.InRange(activeWorkers, 0, dop == -1 ? Environment.ProcessorCount : dop);
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
@@ -123,6 +164,40 @@ namespace System.Threading.Tasks.Tests
         [InlineData(2)]
         [InlineData(4)]
         [InlineData(128)]
+        public async Task Dop_WorkersCreatedRespectingLimitAndTaskScheduler_For(int dop)
+        {
+            bool exit = false;
+            int activeWorkers = 0;
+            var block = new TaskCompletionSource();
+
+            int MaxSchedulerLimit = Math.Min(2, Environment.ProcessorCount);
+
+            Task t = Parallel.ForAsync(long.MinValue, long.MaxValue, new ParallelOptions { MaxDegreeOfParallelism = dop, TaskScheduler = new MaxConcurrencyLevelPassthroughTaskScheduler(MaxSchedulerLimit) }, async (item, cancellationToken) =>
+            {
+                Interlocked.Increment(ref activeWorkers);
+                await block.Task;
+                if (Volatile.Read(ref exit))
+                {
+                    throw new FormatException();
+                }
+            });
+            Assert.False(t.IsCompleted);
+
+            await Task.Delay(20); // give the loop some time to run
+
+            Volatile.Write(ref exit, true);
+            block.SetResult();
+            await Assert.ThrowsAsync<FormatException>(() => t);
+
+            Assert.InRange(activeWorkers, 0, Math.Min(MaxSchedulerLimit, dop == -1 ? Environment.ProcessorCount : dop));
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [InlineData(-1)]
+        [InlineData(1)]
+        [InlineData(2)]
+        [InlineData(4)]
+        [InlineData(128)]
         public async Task Dop_WorkersCreatedRespectingLimitAndTaskScheduler_Sync(int dop)
         {
             static IEnumerable<int> IterateUntilSet(StrongBox<bool> box)
@@ -155,6 +230,33 @@ namespace System.Threading.Tasks.Tests
             await t;
 
             Assert.InRange(activeWorkers, 0, Math.Min(MaxSchedulerLimit, dop == -1 ? Environment.ProcessorCount : dop));
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        public async Task Dop_NegativeTaskSchedulerLimitTreatedAsDefault_For()
+        {
+            bool exit = false;
+            int activeWorkers = 0;
+            var block = new TaskCompletionSource();
+
+            Task t = Parallel.ForAsync(long.MinValue, long.MaxValue, new ParallelOptions { TaskScheduler = new MaxConcurrencyLevelPassthroughTaskScheduler(-42) }, async (item, cancellationToken) =>
+            {
+                Interlocked.Increment(ref activeWorkers);
+                await block.Task;
+                if (Volatile.Read(ref exit))
+                {
+                    throw new FormatException();
+                }
+            });
+            Assert.False(t.IsCompleted);
+
+            await Task.Delay(20); // give the loop some time to run
+
+            Volatile.Write(ref exit, true);
+            block.SetResult();
+            await Assert.ThrowsAsync<FormatException>(() => t);
+
+            Assert.InRange(activeWorkers, 0, Environment.ProcessorCount);
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
@@ -191,6 +293,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Dop_NegativeTaskSchedulerLimitTreatedAsDefault_Async()
         {
             static async IAsyncEnumerable<int> IterateUntilSet(StrongBox<bool> box)
@@ -225,6 +328,21 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public async Task RunsAsynchronously_For()
+        {
+            var cts = new CancellationTokenSource();
+
+            Task t = Parallel.ForAsync(long.MinValue, long.MaxValue, cts.Token, (item, cancellationToken) => default);
+            Assert.False(t.IsCompleted);
+
+            cts.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => t);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task RunsAsynchronously_EvenForEntirelySynchronousWork_Sync()
         {
             static IEnumerable<int> Iterate()
@@ -243,6 +361,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task RunsAsynchronously_EvenForEntirelySynchronousWork_Async()
         {
 #pragma warning disable CS1998 // Async method lacks 'await' operators and will run synchronously
@@ -263,6 +382,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(-1)]
         [InlineData(1)]
         [InlineData(2)]
@@ -302,6 +422,22 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public void EmptyRange_For()
+        {
+            int counter = 0;
+            Task t = Parallel.ForAsync(10, 10, (item, cancellationToken) =>
+            {
+                Interlocked.Increment(ref counter);
+                return default;
+            });
+            Assert.True(t.IsCompletedSuccessfully);
+
+            Assert.Equal(0, counter);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task EmptySource_Sync()
         {
             int counter = 0;
@@ -315,6 +451,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task EmptySource_Async()
         {
             int counter = 0;
@@ -328,6 +465,53 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task AllItemsEnumeratedOnce_For(bool yield)
+        {
+            await Test<int>(yield);
+            await Test<uint>(yield);
+            await Test<long>(yield);
+            await Test<ulong>(yield);
+            await Test<short>(yield);
+            await Test<ushort>(yield);
+            await Test<nint>(yield);
+            await Test<nuint>(yield);
+            await Test<Int128>(yield);
+            await Test<UInt128>(yield);
+            await Test<BigInteger>(yield);
+
+            async Task Test<T>(bool yield) where T : IBinaryInteger<T>
+            {
+                const int Start = 10, Count = 10_000;
+
+                var set = new HashSet<T>();
+
+                await Parallel.ForAsync(T.CreateTruncating(Start), T.CreateTruncating(Start + Count), async (item, cancellationToken) =>
+                {
+                    lock (set)
+                    {
+                        Assert.True(set.Add(item));
+                    }
+
+                    if (yield)
+                    {
+                        await Task.Yield();
+                    }
+                });
+
+                Assert.False(set.Contains(T.CreateTruncating(Start - 1)));
+                for (int i = Start; i < Start + Count; i++)
+                {
+                    Assert.True(set.Contains(T.CreateTruncating(i)));
+                }
+                Assert.False(set.Contains(T.CreateTruncating(Start + Count + 1)));
+            }
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(false)]
         [InlineData(true)]
         public async Task AllItemsEnumeratedOnce_Sync(bool yield)
@@ -349,13 +533,16 @@ namespace System.Threading.Tasks.Tests
                 }
             });
 
+            Assert.False(set.Contains(Start - 1));
             for (int i = Start; i < Start + Count; i++)
             {
                 Assert.True(set.Contains(i));
             }
+            Assert.False(set.Contains(Start + Count + 1));
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(false)]
         [InlineData(true)]
         public async Task AllItemsEnumeratedOnce_Async(bool yield)
@@ -377,13 +564,45 @@ namespace System.Threading.Tasks.Tests
                 }
             });
 
+            Assert.False(set.Contains(Start - 1));
             for (int i = Start; i < Start + Count; i++)
             {
                 Assert.True(set.Contains(i));
             }
+            Assert.False(set.Contains(Start + Count + 1));
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task TaskScheduler_AllCodeExecutedOnCorrectScheduler_For(bool defaultScheduler)
+        {
+            TaskScheduler scheduler = defaultScheduler ?
+                TaskScheduler.Default :
+                new ConcurrentExclusiveSchedulerPair().ConcurrentScheduler;
+
+            TaskScheduler otherScheduler = new ConcurrentExclusiveSchedulerPair().ConcurrentScheduler;
+
+            var cq = new ConcurrentQueue<int>();
+
+            await Parallel.ForAsync(1, 101, new ParallelOptions { TaskScheduler = scheduler }, async (item, cancellationToken) =>
+            {
+                Assert.Same(scheduler, TaskScheduler.Current);
+                await Task.Yield();
+                cq.Enqueue(item);
+
+                if (item % 10 == 0)
+                {
+                    await new SwitchTo(otherScheduler);
+                }
+            });
+
+            Assert.Equal(Enumerable.Range(1, 100), cq.OrderBy(i => i));
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(false)]
         [InlineData(true)]
         public async Task TaskScheduler_AllCodeExecutedOnCorrectScheduler_Sync(bool defaultScheduler)
@@ -422,6 +641,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(false)]
         [InlineData(true)]
         public async Task TaskScheduler_AllCodeExecutedOnCorrectScheduler_Async(bool defaultScheduler)
@@ -461,6 +681,18 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public async Task Cancellation_CancelsIterationAndReturnsCanceledTask_For()
+        {
+            using var cts = new CancellationTokenSource(10);
+            OperationCanceledException oce = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Parallel.ForAsync(long.MinValue, long.MaxValue, cts.Token, async (item, cancellationToken) =>
+            {
+                await Task.Yield();
+            }));
+            Assert.Equal(cts.Token, oce.CancellationToken);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
         public async Task Cancellation_CancelsIterationAndReturnsCanceledTask_Sync()
         {
             static async IAsyncEnumerable<int> Infinite()
@@ -482,6 +714,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Cancellation_CancelsIterationAndReturnsCanceledTask_Async()
         {
             static async IAsyncEnumerable<int> InfiniteAsync()
@@ -503,6 +736,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Cancellation_CorrectTokenPassedToAsyncEnumerator()
         {
             static async IAsyncEnumerable<CancellationToken> YieldTokenAsync([EnumeratorCancellation] CancellationToken cancellationToken)
@@ -519,6 +753,23 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public async Task Cancellation_SameTokenPassedToEveryInvocation_For()
+        {
+            var cq = new ConcurrentQueue<CancellationToken>();
+
+            await Parallel.ForAsync(1, 101, async (item, cancellationToken) =>
+            {
+                cq.Enqueue(cancellationToken);
+                await Task.Yield();
+            });
+
+            Assert.Equal(100, cq.Count);
+            Assert.Equal(1, cq.Distinct().Count());
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Cancellation_SameTokenPassedToEveryInvocation_Sync()
         {
             var cq = new ConcurrentQueue<CancellationToken>();
@@ -534,6 +785,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Cancellation_SameTokenPassedToEveryInvocation_Async()
         {
             var cq = new ConcurrentQueue<CancellationToken>();
@@ -549,6 +801,34 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public async Task Cancellation_HasPriorityOverExceptions_For()
+        {
+            var tcs = new TaskCompletionSource();
+            var cts = new CancellationTokenSource();
+
+            Task t = Parallel.ForAsync(0, long.MaxValue, new ParallelOptions { CancellationToken = cts.Token, MaxDegreeOfParallelism = 2 }, async (item, cancellationToken) =>
+            {
+                if (item == 0)
+                {
+                    await tcs.Task;
+                    cts.Cancel();
+                    throw new FormatException();
+                }
+                else
+                {
+                    tcs.TrySetResult();
+                    await Task.Yield();
+                }
+            });
+
+            OperationCanceledException oce = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => t);
+            Assert.Equal(cts.Token, oce.CancellationToken);
+            Assert.True(t.IsCanceled);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Cancellation_HasPriorityOverExceptions_Sync()
         {
             static IEnumerable<int> Iterate()
@@ -581,6 +861,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Cancellation_HasPriorityOverExceptions_Async()
         {
             static async IAsyncEnumerable<int> Iterate()
@@ -617,6 +898,24 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task Cancellation_FaultsForOceForNonCancellation_For(bool internalToken)
+        {
+            var cts = new CancellationTokenSource();
+
+            Task t = Parallel.ForAsync(long.MinValue, long.MaxValue, new ParallelOptions { CancellationToken = cts.Token }, (item, cancellationToken) =>
+            {
+                throw new OperationCanceledException(internalToken ? cancellationToken : cts.Token);
+            });
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => t);
+            Assert.True(t.IsFaulted);
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(false)]
         [InlineData(true)]
         public async Task Cancellation_FaultsForOceForNonCancellation(bool internalToken)
@@ -643,6 +942,40 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        [InlineData(0, 4)]
+        [InlineData(1, 4)]
+        [InlineData(2, 4)]
+        [InlineData(3, 4)]
+        [InlineData(4, 4)]
+        public async Task Cancellation_InternalCancellationExceptionsArentFilteredOut_For(int numThrowingNonCanceledOce, int total)
+        {
+            var cts = new CancellationTokenSource();
+
+            var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int remainingCount = total;
+
+            Task t = Parallel.ForAsync(0, total, new ParallelOptions { CancellationToken = cts.Token, MaxDegreeOfParallelism = total }, async (item, cancellationToken) =>
+            {
+                // Wait for all operations to be started
+                if (Interlocked.Decrement(ref remainingCount) == 0)
+                {
+                    barrier.SetResult();
+                }
+                await barrier.Task;
+
+                throw item < numThrowingNonCanceledOce ?
+                    new OperationCanceledException(cancellationToken) :
+                    throw new FormatException();
+            });
+
+            await Assert.ThrowsAnyAsync<Exception>(() => t);
+            Assert.Equal(total, t.Exception.InnerExceptions.Count);
+            Assert.Equal(numThrowingNonCanceledOce, t.Exception.InnerExceptions.Count(e => e is OperationCanceledException));
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(0, 4)]
         [InlineData(1, 4)]
         [InlineData(2, 4)]
@@ -675,6 +1008,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void Exception_FromGetEnumerator_Sync()
         {
             Task t = Parallel.ForEachAsync((IEnumerable<int>)new ThrowsFromGetEnumerator(), (item, cancellationToken) => default);
@@ -684,6 +1018,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void Exception_FromGetEnumerator_Async()
         {
             Task t = Parallel.ForEachAsync((IAsyncEnumerable<int>)new ThrowsFromGetEnumerator(), (item, cancellationToken) => default);
@@ -693,6 +1028,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void Exception_NullFromGetEnumerator_Sync()
         {
             Task t = Parallel.ForEachAsync((IEnumerable<int>)new ReturnsNullFromGetEnumerator(), (item, cancellationToken) => default);
@@ -702,6 +1038,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void Exception_NullFromGetEnumerator_Async()
         {
             Task t = Parallel.ForEachAsync((IAsyncEnumerable<int>)new ReturnsNullFromGetEnumerator(), (item, cancellationToken) => default);
@@ -711,6 +1048,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromMoveNext_Sync()
         {
             static IEnumerable<int> Iterate()
@@ -731,6 +1069,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromMoveNext_Async()
         {
             static async IAsyncEnumerable<int> Iterate()
@@ -752,6 +1091,29 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public async Task Exception_FromLoopBody_For()
+        {
+            var barrier = new Barrier(2);
+            Task t = Parallel.ForAsync(1, 3, new ParallelOptions { MaxDegreeOfParallelism = barrier.ParticipantCount }, (item, cancellationToken) =>
+            {
+                barrier.SignalAndWait();
+                throw item switch
+                {
+                    1 => new FormatException(),
+                    2 => new InvalidTimeZoneException(),
+                    _ => new Exception()
+                };
+            });
+            await Assert.ThrowsAnyAsync<Exception>(() => t);
+            Assert.True(t.IsFaulted);
+            Assert.Equal(2, t.Exception.InnerExceptions.Count);
+            Assert.Contains(t.Exception.InnerExceptions, e => e is FormatException);
+            Assert.Contains(t.Exception.InnerExceptions, e => e is InvalidTimeZoneException);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromLoopBody_Sync()
         {
             static IEnumerable<int> Iterate()
@@ -779,6 +1141,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromLoopBody_Async()
         {
             static async IAsyncEnumerable<int> Iterate()
@@ -820,6 +1183,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromDispose_Sync()
         {
             Task t = Parallel.ForEachAsync((IEnumerable<int>)new ThrowsExceptionFromDispose(), (item, cancellationToken) => default);
@@ -828,6 +1192,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromDispose_Async()
         {
             Task t = Parallel.ForEachAsync((IAsyncEnumerable<int>)new ThrowsExceptionFromDispose(), (item, cancellationToken) => default);
@@ -836,6 +1201,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromDisposeAndCancellationCallback_Sync()
         {
             Task t = Parallel.ForEachAsync((IEnumerable<int>)new ThrowsExceptionFromDisposeAndCancellationCallback(), (item, cancellationToken) => default);
@@ -845,6 +1211,7 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_FromDisposeAndCancellationCallback_Async()
         {
             Task t = Parallel.ForEachAsync((IAsyncEnumerable<int>)new ThrowsExceptionFromDisposeAndCancellationCallback(), (item, cancellationToken) => default);
@@ -854,6 +1221,36 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        public async Task Exception_ImplicitlyCancelsOtherWorkers_For()
+        {
+            await Assert.ThrowsAsync<Exception>(() => Parallel.ForAsync(0, long.MaxValue, async (item, cancellationToken) =>
+            {
+                await Task.Yield();
+                if (item == 1000)
+                {
+                    throw new Exception();
+                }
+            }));
+
+            await Assert.ThrowsAsync<FormatException>(() => Parallel.ForAsync(0, long.MaxValue, new ParallelOptions { MaxDegreeOfParallelism = 2 }, async (item, cancellationToken) =>
+            {
+                if (item == 0)
+                {
+                    throw new FormatException();
+                }
+                else
+                {
+                    Assert.Equal(1, item);
+                    var tcs = new TaskCompletionSource();
+                    cancellationToken.Register(() => tcs.SetResult());
+                    await tcs.Task;
+                }
+            }));
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public async Task Exception_ImplicitlyCancelsOtherWorkers_Sync()
         {
             static IEnumerable<int> Iterate()
@@ -959,6 +1356,26 @@ namespace System.Threading.Tasks.Tests
         }
 
         [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task ExecutionContext_FlowsToWorkerBodies_For(bool defaultScheduler)
+        {
+            TaskScheduler scheduler = defaultScheduler ?
+                TaskScheduler.Default :
+                new ConcurrentExclusiveSchedulerPair().ConcurrentScheduler;
+
+            var al = new AsyncLocal<int>();
+            al.Value = 42;
+            await Parallel.ForAsync(0, 100, async (item, cancellationToken) =>
+            {
+                await Task.Yield();
+                Assert.Equal(42, al.Value);
+            });
+        }
+
+        [ConditionalTheory(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         [InlineData(false)]
         [InlineData(true)]
         public async Task ExecutionContext_FlowsToWorkerBodies_Sync(bool defaultScheduler)

@@ -33,13 +33,12 @@ namespace System.Reflection.Runtime.TypeInfos
             if (types.Length == 0 && candidates.Count == 1)
             {
                 ConstructorInfo firstCandidate = candidates[0];
-                ParameterInfo[] parameters = firstCandidate.GetParametersNoCopy();
-                if (parameters.Length == 0)
+                if (firstCandidate.GetParametersAsSpan().Length == 0)
                     return firstCandidate;
             }
 
             if ((bindingAttr & BindingFlags.ExactBinding) != 0)
-                return System.DefaultBinder.ExactBinding(candidates.ToArray(), types) as ConstructorInfo;
+                return System.DefaultBinder.ExactBinding(candidates.AsSpan(), types);
 
             binder ??= DefaultBinder;
 
@@ -155,9 +154,10 @@ namespace System.Reflection.Runtime.TypeInfos
                 if (types == null || types.Length == 0)
                 {
                     // no arguments
+                    PropertyInfo firstCandidate = candidates[0];
+
                     if (candidates.Count == 1)
                     {
-                        PropertyInfo firstCandidate = candidates[0];
                         if (returnType is not null && !returnType.IsEquivalentTo(firstCandidate.PropertyType))
                             return null;
                         return firstCandidate;
@@ -165,8 +165,10 @@ namespace System.Reflection.Runtime.TypeInfos
                     else
                     {
                         if (returnType is null)
+                        {
                             // if we are here we have no args or property type to select over and we have more than one property with that name
-                            throw new AmbiguousMatchException();
+                            throw ThrowHelper.GetAmbiguousMatchException(firstCandidate);
+                        }
                     }
                 }
 

@@ -122,13 +122,11 @@ namespace System
         private const ulong TicksPer6Hours = TicksPerHour * 6;
         private const int March1BasedDayOfNewYear = 306;              // Days between March 1 and January 1
 
-        internal static ReadOnlySpan<uint> DaysToMonth365 => new uint[] {
-            0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 };
-        internal static ReadOnlySpan<uint> DaysToMonth366 => new uint[] {
-            0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366 };
+        internal static ReadOnlySpan<uint> DaysToMonth365 => [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365];
+        internal static ReadOnlySpan<uint> DaysToMonth366 => [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366];
 
-        private static ReadOnlySpan<byte> DaysInMonth365 => new byte[] { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-        private static ReadOnlySpan<byte> DaysInMonth366 => new byte[] { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+        private static ReadOnlySpan<byte> DaysInMonth365 => [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        private static ReadOnlySpan<byte> DaysInMonth366 => [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
         public static readonly DateTime MinValue;
         public static readonly DateTime MaxValue = new DateTime(MaxTicks, DateTimeKind.Unspecified);
@@ -1806,7 +1804,8 @@ namespace System
         public bool TryFormat(Span<char> destination, out int charsWritten, [StringSyntax(StringSyntaxAttribute.DateTimeFormat)] ReadOnlySpan<char> format = default, IFormatProvider? provider = null) =>
             DateTimeFormat.TryFormat(this, destination, out charsWritten, format, provider);
 
-        bool IUtf8SpanFormattable.TryFormat(Span<byte> utf8Destination, out int bytesWritten, [StringSyntax(StringSyntaxAttribute.DateTimeFormat)] ReadOnlySpan<char> format, IFormatProvider? provider) =>
+        /// <inheritdoc cref="IUtf8SpanFormattable.TryFormat" />
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, [StringSyntax(StringSyntaxAttribute.DateTimeFormat)] ReadOnlySpan<char> format = default, IFormatProvider? provider = null) =>
             DateTimeFormat.TryFormat(this, utf8Destination, out bytesWritten, format, provider);
 
         public DateTime ToUniversalTime()

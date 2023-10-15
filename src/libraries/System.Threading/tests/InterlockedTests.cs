@@ -9,7 +9,7 @@ using Xunit;
 
 namespace System.Threading.Tests
 {
-    public class InterlockedTests
+    public unsafe class InterlockedTests
     {
         [Fact]
         public void InterlockedAdd_Int32()
@@ -461,6 +461,7 @@ namespace System.Threading.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void InterlockedIncrement_Multithreaded_Int32()
         {
             const int ThreadCount = 10;
@@ -498,6 +499,7 @@ namespace System.Threading.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void InterlockedCompareExchange_Multithreaded_Double()
         {
             const int ThreadCount = 10;
@@ -546,6 +548,7 @@ namespace System.Threading.Tests
         }
 
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void InterlockedAddAndRead_Multithreaded_Int64()
         {
             const int ThreadCount = 10;
@@ -603,7 +606,25 @@ namespace System.Threading.Tests
             Assert.Equal(ThreadCount * IterationCount * Increment, Interlocked.Read(ref value));
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static Action MemoryBarrierDelegate() => Interlocked.MemoryBarrier;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static delegate* <void> MemoryBarrierPointer() => &Interlocked.MemoryBarrier;
+
+        [Fact()]
+        public void MemoryBarrierIntrinsic()
+        {
+            // Interlocked.MemoryBarrier is a self-referring intrinsic
+            // we should be able to call it through a delegate.
+            MemoryBarrierDelegate()();
+
+            // through a method pointer
+            MemoryBarrierPointer()();
+        }
+
         [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsThreadingSupported))]
+        [ActiveIssue("https://github.com/dotnet/runtime/issues/91538", typeof(PlatformDetection), nameof(PlatformDetection.IsWasmThreadingSupported))]
         public void MemoryBarrierProcessWide()
         {
             // Stress MemoryBarrierProcessWide correctness using a simple AsymmetricLock

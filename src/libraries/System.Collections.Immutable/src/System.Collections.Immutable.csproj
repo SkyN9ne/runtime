@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <TargetFrameworks>$(NetCoreAppCurrent);$(NetCoreAppPrevious);$(NetCoreAppMinimum);netstandard2.0;$(NetFrameworkMinimum)</TargetFrameworks>
     <IsPackable>true</IsPackable>
@@ -24,7 +25,6 @@ The System.Collections.Immutable library is built-in as part of the shared frame
     <Compile Include="System\Collections\Frozen\FrozenHashTable.cs" />
     <Compile Include="System\Collections\Frozen\FrozenSet.cs" />
     <Compile Include="System\Collections\Frozen\FrozenSetInternalBase.cs" />
-    <Compile Include="System\Collections\Frozen\ImmutableArrayFactory.cs" />
     <Compile Include="System\Collections\Frozen\ItemsFrozenSet.cs" />
     <Compile Include="System\Collections\Frozen\KeysAndValuesFrozenDictionary.cs" />
     <Compile Include="System\Collections\Frozen\SmallFrozenDictionary.cs" />
@@ -39,6 +39,7 @@ The System.Collections.Immutable library is built-in as part of the shared frame
     <Compile Include="System\Collections\Frozen\Int32\Int32FrozenSet.cs" />
     <Compile Include="System\Collections\Frozen\String\Hashing.cs" />
     <Compile Include="System\Collections\Frozen\String\KeyAnalyzer.cs" />
+    <Compile Include="System\Collections\Frozen\String\LengthBuckets.cs" />
     <Compile Include="System\Collections\Frozen\String\LengthBucketsFrozenDictionary.cs" />
     <Compile Include="System\Collections\Frozen\String\LengthBucketsFrozenSet.cs" />
     <Compile Include="System\Collections\Frozen\String\OrdinalStringFrozenDictionary.cs" />
@@ -141,13 +142,14 @@ The System.Collections.Immutable library is built-in as part of the shared frame
     <Compile Include="System\Collections\Immutable\SortedInt32KeyNode.cs" />
     <Compile Include="System\Collections\Immutable\SortedInt32KeyNode.Enumerator.cs" />
     <Compile Include="System\Linq\ImmutableArrayExtensions.cs" />
+    <Compile Include="System\Runtime.InteropServices\ImmutableCollectionsMarshal.cs" />
     <Compile Include="Validation\Requires.cs" />
     <Compile Include="$(CommonPath)System\Runtime\Versioning\NonVersionableAttribute.cs" Link="Common\System\Runtime\Versioning\NonVersionableAttribute.cs" />
     <None Include="Interfaces.cd" />
   </ItemGroup>
 
-  <ItemGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net6.0'))">
-    <Compile Include="System\Collections\Frozen\WrappedDictionaryFrozenDictionary.cs" />
+  <ItemGroup Condition="'$(TargetFrameworkIdentifier)' != '.NETCoreApp'">
+    <Compile Include="$(CoreLibSharedDir)System\Runtime\CompilerServices\CollectionBuilderAttribute.cs" Link="System\Runtime\CompilerServices\CollectionBuilderAttribute.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == '$(NetCoreAppCurrent)'">
@@ -161,9 +163,7 @@ The System.Collections.Immutable library is built-in as part of the shared frame
 
   <ItemGroup Condition="'$(TargetFrameworkIdentifier)' != '.NETCoreApp'">
     <PackageReference Include="System.Memory" Version="$(SystemMemoryVersion)" />
-  </ItemGroup>
-
-  <ItemGroup Condition="!$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net7.0'))">
     <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="$(SystemRuntimeCompilerServicesUnsafeVersion)" />
   </ItemGroup>
+
 </Project>

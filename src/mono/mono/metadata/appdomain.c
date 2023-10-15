@@ -26,13 +26,6 @@
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
-#ifdef HAVE_UTIME_H
-#include <utime.h>
-#else
-#ifdef HAVE_SYS_UTIME_H
-#include <sys/utime.h>
-#endif
-#endif
 
 #include <mono/metadata/gc-internals.h>
 #include <mono/metadata/object.h>
@@ -56,10 +49,8 @@
 #include <mono/metadata/profiler-private.h>
 #include <mono/metadata/reflection-internals.h>
 #include <mono/metadata/abi-details.h>
-#include <mono/utils/mono-uri.h>
 #include <mono/utils/mono-logger-internals.h>
 #include <mono/utils/mono-path.h>
-#include <mono/utils/mono-stdlib.h>
 #include <mono/utils/mono-error-internals.h>
 #include <mono/utils/atomic.h>
 #include <mono/utils/mono-memory-model.h>
@@ -569,6 +560,10 @@ mono_domain_fire_assembly_load_event (MonoDomain *domain, MonoAssembly *assembly
 
 	MONO_STATIC_POINTER_INIT_END (MonoMethod, method)
 	if (!method)
+		goto exit;
+
+	if (assembly->dynamic)
+		/* Called by RuntimeAssemblyBuilder:.ctor () after the manifest module has been created */
 		goto exit;
 
 	MonoReflectionAssemblyHandle assembly_handle;

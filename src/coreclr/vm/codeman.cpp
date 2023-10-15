@@ -30,6 +30,9 @@
 
 #include "configuration.h"
 
+#include <minipal/cpufeatures.h>
+#include <minipal/cpuid.h>
+
 #ifdef HOST_64BIT
 #define CHECK_DUPLICATED_STRUCT_LAYOUTS
 #include "../debug/daccess/fntableaccess.h"
@@ -807,7 +810,7 @@ ExecutionManager::DeleteRange
 
 //-----------------------------------------------------------------------------
 
-#if defined(TARGET_ARM) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#if defined(TARGET_ARM) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
 #define EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
 #endif
 
@@ -877,7 +880,7 @@ BOOL IsFunctionFragment(TADDR baseAddress, PTR_RUNTIME_FUNCTION pFunctionEntry)
     }
 
     return ((*pUnwindCodes & 0xFF) == 0xE5);
-#elif defined(TARGET_LOONGARCH64)
+#elif defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
 
     // LOONGARCH64 is a little bit more flexible, in the sense that it supports partial prologs. However only one of the
     // prolog regions are allowed to alter SP and that's the Host Record. Partial prologs are used in ShrinkWrapping
@@ -915,35 +918,6 @@ BOOL IsFunctionFragment(TADDR baseAddress, PTR_RUNTIME_FUNCTION pFunctionEntry)
 #else
     PORTABILITY_ASSERT("IsFunctionFragnent - NYI on this platform");
 #endif
-}
-
-// When we have fragmented unwind we usually want to refer to the
-// unwind record that includes the prolog. We can find it by searching
-// back in the sequence of unwind records.
-PTR_RUNTIME_FUNCTION FindRootEntry(PTR_RUNTIME_FUNCTION pFunctionEntry, TADDR baseAddress)
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-
-    PTR_RUNTIME_FUNCTION pRootEntry = pFunctionEntry;
-
-    if (pRootEntry != NULL)
-    {
-        // Walk backwards in the RUNTIME_FUNCTION array until we find a non-fragment.
-        // We're guaranteed to find one, because we require that a fragment live in a function or funclet
-        // that has a prolog, which will have non-fragment .xdata.
-        while (true)
-        {
-            if (!IsFunctionFragment(baseAddress, pRootEntry))
-            {
-                // This is not a fragment; we're done
-                break;
-            }
-
-            --pRootEntry;
-        }
-    }
-
-    return pRootEntry;
 }
 
 #endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
@@ -1076,7 +1050,7 @@ PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFuncti
     return xdata;
 
 
-#elif defined(TARGET_LOONGARCH64)
+#elif defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
     // TODO: maybe optimize further.
     // if this function uses packed unwind data then at least one of the two least significant bits
     // will be non-zero.  if this is the case then there will be no xdata record to enumerate.
@@ -1115,7 +1089,6 @@ PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFuncti
     *pSize = size;
     return xdata;
 
-
 #else
     PORTABILITY_ASSERT("GetUnwindDataBlob");
     return NULL;
@@ -1132,12 +1105,30 @@ TADDR IJitManager::GetFuncletStartAddress(EECodeInfo * pCodeInfo)
 #endif
 
     TADDR baseAddress = pCodeInfo->GetModuleBase();
+    TADDR funcletStartAddress = baseAddress + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry);
 
 #if defined(EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS)
-    pFunctionEntry = FindRootEntry(pFunctionEntry, baseAddress);
-#endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
+    // Is the RUNTIME_FUNCTION a fragment? If so, we need to walk backwards until we find the first
+    // non-fragment RUNTIME_FUNCTION, and use that one. This happens when we have very large functions
+    // and multiple RUNTIME_FUNCTION entries per function or funclet. However, all but the first will
+    // have the "F" bit set in the unwind data, indicating a fragment (with phantom prolog unwind codes).
 
-    TADDR funcletStartAddress = baseAddress + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry);
+    for (;;)
+    {
+        if (!IsFunctionFragment(baseAddress, pFunctionEntry))
+        {
+            // This is not a fragment; we're done
+            break;
+        }
+
+        // We found a fragment. Walk backwards in the RUNTIME_FUNCTION array until we find a non-fragment.
+        // We're guaranteed to find one, because we require that a fragment live in a function or funclet
+        // that has a prolog, which will have non-fragment .xdata.
+        --pFunctionEntry;
+
+        funcletStartAddress = baseAddress + RUNTIME_FUNCTION__BeginAddress(pFunctionEntry);
+    }
+#endif // EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS
 
     return funcletStartAddress;
 }
@@ -1257,71 +1248,9 @@ EEJitManager::EEJitManager()
 
     m_storeRichDebugInfo = false;
     m_cleanupList = NULL;
+
+    SetCpuInfo();
 }
-
-#if defined(TARGET_X86) || defined(TARGET_AMD64)
-
-bool DoesOSSupportAVX()
-{
-    LIMITED_METHOD_CONTRACT;
-
-#ifndef TARGET_UNIX
-    // On Windows we have an api(GetEnabledXStateFeatures) to check if AVX is supported
-    typedef DWORD64 (WINAPI *PGETENABLEDXSTATEFEATURES)();
-    PGETENABLEDXSTATEFEATURES pfnGetEnabledXStateFeatures = NULL;
-
-    HMODULE hMod = WszLoadLibraryEx(WINDOWS_KERNEL32_DLLNAME_W, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if(hMod == NULL)
-        return FALSE;
-
-    pfnGetEnabledXStateFeatures = (PGETENABLEDXSTATEFEATURES)GetProcAddress(hMod, "GetEnabledXStateFeatures");
-
-    if (pfnGetEnabledXStateFeatures == NULL)
-    {
-        return FALSE;
-    }
-
-    DWORD64 FeatureMask = pfnGetEnabledXStateFeatures();
-    if ((FeatureMask & XSTATE_MASK_AVX) == 0)
-    {
-        return FALSE;
-    }
-#endif // !TARGET_UNIX
-
-    return TRUE;
-}
-
-bool DoesOSSupportAVX512()
-{
-    LIMITED_METHOD_CONTRACT;
-
-#ifndef TARGET_UNIX
-    // On Windows we have an api(GetEnabledXStateFeatures) to check if AVX512 is supported
-    typedef DWORD64 (WINAPI *PGETENABLEDXSTATEFEATURES)();
-    PGETENABLEDXSTATEFEATURES pfnGetEnabledXStateFeatures = NULL;
-
-    HMODULE hMod = WszLoadLibraryEx(WINDOWS_KERNEL32_DLLNAME_W, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if(hMod == NULL)
-        return FALSE;
-
-    pfnGetEnabledXStateFeatures = (PGETENABLEDXSTATEFEATURES)GetProcAddress(hMod, "GetEnabledXStateFeatures");
-
-    if (pfnGetEnabledXStateFeatures == NULL)
-    {
-        return FALSE;
-    }
-
-    DWORD64 FeatureMask = pfnGetEnabledXStateFeatures();
-    if ((FeatureMask & XSTATE_MASK_AVX512) == 0)
-    {
-        return FALSE;
-    }
-#endif // !TARGET_UNIX
-
-    return TRUE;
-}
-
-#endif // defined(TARGET_X86) || defined(TARGET_AMD64)
 
 #ifdef TARGET_ARM64
 extern "C" DWORD64 __stdcall GetDataCacheZeroIDReg();
@@ -1337,110 +1266,287 @@ void EEJitManager::SetCpuInfo()
 
     CORJIT_FLAGS CPUCompileFlags;
 
-#if defined(TARGET_X86)
-    CORINFO_CPU cpuInfo;
-    GetSpecificCpuInfo(&cpuInfo);
-
-    switch (CPU_X86_FAMILY(cpuInfo.dwCPUType))
-    {
-        case CPU_X86_PENTIUM_4:
-            CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_TARGET_P4);
-            break;
-
-        default:
-            break;
-    }
-
-    if (CPU_X86_USE_CMOV(cpuInfo.dwFeatures))
-    {
-        CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_USE_CMOV);
-        CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_USE_FCOMI);
-    }
-#endif // TARGET_X86
+    int cpuFeatures = minipal_getcpufeatures();
 
 #if defined(TARGET_X86) || defined(TARGET_AMD64)
-    CPUCompileFlags.Set(InstructionSet_X86Base);
 
-    // NOTE: The below checks are based on the information reported by
-    //   Intel® 64 and IA-32 Architectures Software Developer’s Manual. Volume 2
-    //   and
-    //   AMD64 Architecture Programmer’s Manual. Volume 3
-    // For more information, please refer to the CPUID instruction in the respective manuals
+#if defined(TARGET_X86) && !defined(TARGET_WINDOWS)
+    // Linux may still support no SSE/SSE2 for 32-bit
+    if ((cpuFeatures & XArchIntrinsicConstants_VectorT128) == 0)
+    {
+        EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("SSE and SSE2 processor support required."));
+    }
+#else
+    _ASSERTE((cpuFeatures & XArchIntrinsicConstants_VectorT128) != 0);
+#endif
 
-    // We will set the following flags:
-    //   CORJIT_FLAG_USE_SSE2 is required
-    //      SSE       - EDX bit 25
-    //      SSE2      - EDX bit 26
-    //   CORJIT_FLAG_USE_AES
-    //      CORJIT_FLAG_USE_SSE2
-    //      AES       - ECX bit 25
-    //   CORJIT_FLAG_USE_PCLMULQDQ
-    //      CORJIT_FLAG_USE_SSE2
-    //      PCLMULQDQ - ECX bit 1
-    //   CORJIT_FLAG_USE_SSE3 if the following feature bits are set (input EAX of 1)
-    //      CORJIT_FLAG_USE_SSE2
-    //      SSE3      - ECX bit 0
-    //   CORJIT_FLAG_USE_SSSE3 if the following feature bits are set (input EAX of 1)
-    //      CORJIT_FLAG_USE_SSE3
-    //      SSSE3     - ECX bit 9
-    //   CORJIT_FLAG_USE_SSE41 if the following feature bits are set (input EAX of 1)
-    //      CORJIT_FLAG_USE_SSSE3
-    //      SSE4.1    - ECX bit 19
-    //   CORJIT_FLAG_USE_SSE42 if the following feature bits are set (input EAX of 1)
-    //      CORJIT_FLAG_USE_SSE41
-    //      SSE4.2    - ECX bit 20
-    //   CORJIT_FLAG_USE_MOVBE if the following feature bits are set (input EAX of 1)
-    //      CORJIT_FLAG_USE_SSE42
-    //      MOVBE    - ECX bit 22
-    //   CORJIT_FLAG_USE_POPCNT if the following feature bits are set (input EAX of 1)
-    //      CORJIT_FLAG_USE_SSE42
-    //      POPCNT    - ECX bit 23
-    //   CORJIT_FLAG_USE_AVX if the following feature bits are set (input EAX of 1), and xmmYmmStateSupport returns 1:
-    //      CORJIT_FLAG_USE_SSE42
-    //      OSXSAVE   - ECX bit 27
-    //      AVX       - ECX bit 28
-    //      XGETBV    - XCR0[2:1]    11b
-    //   CORJIT_FLAG_USE_FMA if the following feature bits are set (input EAX of 1), and xmmYmmStateSupport returns 1:
-    //      CORJIT_FLAG_USE_AVX
-    //      FMA       - ECX bit 12
-    //   CORJIT_FLAG_USE_AVX2 if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX
-    //      AVX2      - EBX bit 5
-    //   CORJIT_FLAG_USE_AVXVNNI if the following feature bit is set (input EAX of 0x07 and input ECX of 1):
-    //      CORJIT_FLAG_USE_AVX2
-    //      AVXVNNI   - EAX bit 4
-    //   CORJIT_FLAG_USE_AVX_512F if the following feature bit is set (input EAX of 0x07 and input ECX of 0), and avx512StateSupport returns 1:
-    //      CORJIT_FLAG_USE_AVX2
-    //      AVX512F   - EBX bit 16
-    //      XGETBV    - XRC0[7:5]    111b
-    //   CORJIT_FLAG_USE_AVX_512F_VL if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F
-    //      AVX512VL   - EBX bit 31
-    //   CORJIT_FLAG_USE_AVX_512BW if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F
-    //      AVX512BW   - EBX bit 30
-    //   CORJIT_FLAG_USE_AVX_512BW_VL if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F_VL
-    //      CORJIT_FLAG_USE_AVX_512BW
-    //   CORJIT_FLAG_USE_AVX_512CD if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F
-    //      AVX512CD   - EBX bit 28
-    //   CORJIT_FLAG_USE_AVX_512CD_VL if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F_VL
-    //      CORJIT_FLAG_USE_AVX_512CD
-    //   CORJIT_FLAG_USE_AVX_512DQ if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F
-    //      AVX512DQ   - EBX bit 7
-    //   CORJIT_FLAG_USE_AVX_512DQ_VL if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      CORJIT_FLAG_USE_AVX512F_VL
-    //      CORJIT_FLAG_USE_AVX_512DQ
-    //   CORJIT_FLAG_USE_BMI1 if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      BMI1 - EBX bit 3
-    //   CORJIT_FLAG_USE_BMI2 if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
-    //      BMI2 - EBX bit 8
-    //   CORJIT_FLAG_USE_LZCNT if the following feature bits are set (input EAX of 80000001H)
-    //      LZCNT - ECX bit 5
-    // synchronously updating VM and JIT.
+    CPUCompileFlags.Set(InstructionSet_VectorT128);
+
+    // Get the maximum bitwidth of Vector<T>, rounding down to the nearest multiple of 128-bits
+    uint32_t maxVectorTBitWidth = (CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_MaxVectorTBitWidth) / 128) * 128;
+
+    if (((cpuFeatures & XArchIntrinsicConstants_VectorT256) != 0) && ((maxVectorTBitWidth == 0) || (maxVectorTBitWidth >= 256)))
+    {
+        // We allow 256-bit Vector<T> by default
+        CPUCompileFlags.Set(InstructionSet_VectorT256);
+    }
+
+    // TODO-XArch: Add support for 512-bit Vector<T>
+    _ASSERTE(!CPUCompileFlags.IsSet(InstructionSet_VectorT512));
+
+    if (CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableHWIntrinsic))
+    {
+        CPUCompileFlags.Set(InstructionSet_X86Base);
+    }
+
+    if (CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE))
+    {
+        CPUCompileFlags.Set(InstructionSet_SSE);
+    }
+
+    if (CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE2))
+    {
+        CPUCompileFlags.Set(InstructionSet_SSE2);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Aes) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAES))
+    {
+        CPUCompileFlags.Set(InstructionSet_AES);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx2) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX2))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX2);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512f) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512F))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512F);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512f_vl) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512F_VL))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512F_VL);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512bw) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512BW))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512BW);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512bw_vl) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512BW_VL))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512BW_VL);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512cd) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512CD))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512CD);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512cd_vl) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512CD_VL))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512CD_VL);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512dq) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512DQ))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512DQ);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512dq_vl) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512DQ_VL))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512DQ_VL);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512Vbmi) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512VBMI))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512VBMI);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Avx512Vbmi_vl) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512VBMI_VL))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVX512VBMI_VL);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_AvxVnni) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVXVNNI))
+    {
+        CPUCompileFlags.Set(InstructionSet_AVXVNNI);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Bmi1) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableBMI1))
+    {
+        CPUCompileFlags.Set(InstructionSet_BMI1);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Bmi2) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableBMI2))
+    {
+        CPUCompileFlags.Set(InstructionSet_BMI2);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Fma) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableFMA))
+    {
+        CPUCompileFlags.Set(InstructionSet_FMA);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Lzcnt) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableLZCNT))
+    {
+        CPUCompileFlags.Set(InstructionSet_LZCNT);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Pclmulqdq) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnablePCLMULQDQ))
+    {
+        CPUCompileFlags.Set(InstructionSet_PCLMULQDQ);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Movbe) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableMOVBE))
+    {
+        CPUCompileFlags.Set(InstructionSet_MOVBE);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Popcnt) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnablePOPCNT))
+    {
+        CPUCompileFlags.Set(InstructionSet_POPCNT);
+    }
+
+    // We need to additionally check that EXTERNAL_EnableSSE3_4 is set, as that
+    // is a prexisting config flag that controls the SSE3+ ISAs
+    if (((cpuFeatures & XArchIntrinsicConstants_Sse3) != 0) &&
+        CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE3) &&
+        CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE3_4))
+    {
+        CPUCompileFlags.Set(InstructionSet_SSE3);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Sse41) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE41))
+    {
+        CPUCompileFlags.Set(InstructionSet_SSE41);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Sse42) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE42))
+    {
+        CPUCompileFlags.Set(InstructionSet_SSE42);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Ssse3) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSSE3))
+    {
+        CPUCompileFlags.Set(InstructionSet_SSSE3);
+    }
+
+    if (((cpuFeatures & XArchIntrinsicConstants_Serialize) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableX86Serialize))
+    {
+        CPUCompileFlags.Set(InstructionSet_X86Serialize);
+    }
+#elif defined(TARGET_ARM64)
+
+#if !defined(TARGET_WINDOWS)
+    // Linux may still support no AdvSimd
+    if ((cpuFeatures & ARM64IntrinsicConstants_VectorT128) == 0)
+    {
+        EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("AdvSimd processor support required."));
+    }
+#else
+    _ASSERTE((cpuFeatures & ARM64IntrinsicConstants_VectorT128) != 0);
+#endif
+
+    CPUCompileFlags.Set(InstructionSet_VectorT128);
+
+    if (CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableHWIntrinsic))
+    {
+        CPUCompileFlags.Set(InstructionSet_ArmBase);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_AdvSimd) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64AdvSimd))
+    {
+        CPUCompileFlags.Set(InstructionSet_AdvSimd);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Aes) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Aes))
+    {
+        CPUCompileFlags.Set(InstructionSet_Aes);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Atomics) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Atomics))
+    {
+        CPUCompileFlags.Set(InstructionSet_Atomics);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Rcpc) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Rcpc))
+    {
+        CPUCompileFlags.Set(InstructionSet_Rcpc);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Rcpc2) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Rcpc2))
+    {
+        CPUCompileFlags.Set(InstructionSet_Rcpc2);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Crc32) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Crc32))
+    {
+        CPUCompileFlags.Set(InstructionSet_Crc32);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Dp) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Dp))
+    {
+        CPUCompileFlags.Set(InstructionSet_Dp);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Rdm) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Rdm))
+    {
+        CPUCompileFlags.Set(InstructionSet_Rdm);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Sha1) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Sha1))
+    {
+        CPUCompileFlags.Set(InstructionSet_Sha1);
+    }
+
+    if (((cpuFeatures & ARM64IntrinsicConstants_Sha256) != 0) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Sha256))
+    {
+        CPUCompileFlags.Set(InstructionSet_Sha256);
+    }
+
+    // DCZID_EL0<4> (DZP) indicates whether use of DC ZVA instructions is permitted (0) or prohibited (1).
+    // DCZID_EL0<3:0> (BS) specifies Log2 of the block size in words.
+    //
+    // We set the flag when the instruction is permitted and the block size is 64 bytes.
+    if ((GetDataCacheZeroIDReg() == 4) && CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Dczva))
+    {
+        CPUCompileFlags.Set(InstructionSet_Dczva);
+    }
+
+    if ((cpuFeatures & ARM64IntrinsicConstants_Atomics) != 0)
+    {
+        g_arm64_atomics_present = true;
+    }
+#endif
+
+    // These calls are very important as it ensures the flags are consistent with any
+    // removals specified above. This includes removing corresponding 64-bit ISAs
+    // and any other implications such as SSE2 depending on SSE or AdvSimd on ArmBase
+
+    CPUCompileFlags.Set64BitInstructionSetVariants();
+    CPUCompileFlags.EnsureValidInstructionSetSupport();
+
+#if defined(TARGET_X86) || defined(TARGET_AMD64)
+
+    // Clean up mutually exclusive ISAs
+    if (CPUCompileFlags.IsSet(InstructionSet_VectorT512))
+    {
+        // We don't currently support InstructionSet_VectorT512, but just to
+        // make it future proof.
+        CPUCompileFlags.Clear(InstructionSet_VectorT256);
+        CPUCompileFlags.Clear(InstructionSet_VectorT128);
+    }
+    else if (CPUCompileFlags.IsSet(InstructionSet_VectorT256))
+    {
+        CPUCompileFlags.Clear(InstructionSet_VectorT128);
+    }
 
     int cpuidInfo[4];
 
@@ -1450,462 +1556,65 @@ void EEJitManager::SetCpuInfo()
     const int CPUID_EDX = 3;
 
     __cpuid(cpuidInfo, 0x00000000);
-    uint32_t maxCpuId = static_cast<uint32_t>(cpuidInfo[CPUID_EAX]);
 
-    if (maxCpuId >= 1)
+    bool isGenuineIntel = (cpuidInfo[CPUID_EBX] == 0x756E6547) && // Genu
+                          (cpuidInfo[CPUID_EDX] == 0x49656E69) && // ineI
+                          (cpuidInfo[CPUID_ECX] == 0x6C65746E);   // ntel
+
+    if (isGenuineIntel)
     {
-        __cpuid(cpuidInfo, 0x00000001);
-
-        if (((cpuidInfo[CPUID_EDX] & (1 << 25)) != 0) && ((cpuidInfo[CPUID_EDX] & (1 << 26)) != 0))                     // SSE & SSE2
+        union XarchCpuInfo
         {
-            CPUCompileFlags.Set(InstructionSet_SSE);
-            CPUCompileFlags.Set(InstructionSet_SSE2);
+            struct {
+                uint32_t SteppingId       : 4;
+                uint32_t Model            : 4;
+                uint32_t FamilyId         : 4;
+                uint32_t ProcessorType    : 2;
+                uint32_t Reserved1        : 2; // Unused bits in the CPUID result
+                uint32_t ExtendedModelId  : 4;
+                uint32_t ExtendedFamilyId : 8;
+                uint32_t Reserved         : 4; // Unused bits in the CPUID result
+            };
 
-            if ((cpuidInfo[CPUID_ECX] & (1 << 25)) != 0)                                                          // AESNI
+            uint32_t Value;
+        } xarchCpuInfo;
+
+        __cpuid(cpuidInfo, 0x00000001);
+        _ASSERTE((cpuidInfo[CPUID_EDX] & (1 << 15)) != 0);                                                    // CMOV
+
+        xarchCpuInfo.Value = cpuidInfo[CPUID_EAX];
+
+        // Some architectures can experience frequency throttling when executing
+        // executing 512-bit width instructions. To account for this we set the
+        // default preferred vector width to 256-bits in some scenarios. Power
+        // users can override this with `DOTNET_PreferredVectorBitWidth=512` to
+        // allow using such instructions where hardware support is available.
+
+        if (xarchCpuInfo.FamilyId == 0x06)
+        {
+            if (xarchCpuInfo.ExtendedModelId == 0x05)
             {
-                CPUCompileFlags.Set(InstructionSet_AES);
-            }
-
-            if ((cpuidInfo[CPUID_ECX] & (1 << 1)) != 0)                                                           // PCLMULQDQ
-            {
-                CPUCompileFlags.Set(InstructionSet_PCLMULQDQ);
-            }
-
-            if ((cpuidInfo[CPUID_ECX] & (1 << 0)) != 0)                                                           // SSE3
-            {
-                CPUCompileFlags.Set(InstructionSet_SSE3);
-
-                if ((cpuidInfo[CPUID_ECX] & (1 << 9)) != 0)                                                       // SSSE3
+                if (xarchCpuInfo.Model == 0x05)
                 {
-                    CPUCompileFlags.Set(InstructionSet_SSSE3);
+                    // * Skylake (Server)
+                    // * Cascade Lake
+                    // * Cooper Lake
 
-                    if ((cpuidInfo[CPUID_ECX] & (1 << 19)) != 0)                                                  // SSE4.1
-                    {
-                        CPUCompileFlags.Set(InstructionSet_SSE41);
-
-                        if ((cpuidInfo[CPUID_ECX] & (1 << 20)) != 0)                                              // SSE4.2
-                        {
-                            CPUCompileFlags.Set(InstructionSet_SSE42);
-
-                            if ((cpuidInfo[CPUID_ECX] & (1 << 22)) != 0)                                          // MOVBE
-                            {
-                                CPUCompileFlags.Set(InstructionSet_MOVBE);
-                            }
-
-                            if ((cpuidInfo[CPUID_ECX] & (1 << 23)) != 0)                                          // POPCNT
-                            {
-                                CPUCompileFlags.Set(InstructionSet_POPCNT);
-                            }
-
-                            if (((cpuidInfo[CPUID_ECX] & (1 << 27)) != 0) && ((cpuidInfo[CPUID_ECX] & (1 << 28)) != 0)) // OSXSAVE & AVX
-                            {
-                                if(DoesOSSupportAVX() && (xmmYmmStateSupport() == 1))                       // XGETBV == 11
-                                {
-                                    CPUCompileFlags.Set(InstructionSet_AVX);
-
-                                    if ((cpuidInfo[CPUID_ECX] & (1 << 12)) != 0)                                  // FMA
-                                    {
-                                        CPUCompileFlags.Set(InstructionSet_FMA);
-                                    }
-
-                                    if (maxCpuId >= 0x07)
-                                    {
-                                        __cpuidex(cpuidInfo, 0x00000007, 0x00000000);
-
-                                        if ((cpuidInfo[CPUID_EBX] & (1 << 5)) != 0)                               // AVX2
-                                        {
-                                            CPUCompileFlags.Set(InstructionSet_AVX2);
-
-                                            if (DoesOSSupportAVX512() && (avx512StateSupport() == 1))      // XGETBV XRC0[7:5] == 111
-                                            {
-                                                if ((cpuidInfo[CPUID_EBX] & (1 << 16)) != 0)                     // AVX512F
-                                                {
-                                                    CPUCompileFlags.Set(InstructionSet_AVX512F);
-
-                                                    bool isAVX512_VLSupported = false;
-                                                    if ((cpuidInfo[CPUID_EBX] & (1 << 31)) != 0)                 // AVX512VL
-                                                    {
-                                                        CPUCompileFlags.Set(InstructionSet_AVX512F_VL);
-                                                        isAVX512_VLSupported = true;
-                                                    }
-
-                                                    if ((cpuidInfo[CPUID_EBX] & (1 << 30)) != 0)                 // AVX512BW
-                                                    {
-                                                        CPUCompileFlags.Set(InstructionSet_AVX512BW);
-                                                        if (isAVX512_VLSupported)                          // AVX512BW_VL
-                                                        {
-                                                            CPUCompileFlags.Set(InstructionSet_AVX512BW_VL);
-                                                        }
-                                                    }
-
-                                                    if ((cpuidInfo[CPUID_EBX] & (1 << 28)) != 0)                 // AVX512CD
-                                                    {
-                                                        CPUCompileFlags.Set(InstructionSet_AVX512CD);
-                                                        if (isAVX512_VLSupported)                          // AVX512CD_VL
-                                                        {
-                                                            CPUCompileFlags.Set(InstructionSet_AVX512CD_VL);
-                                                        }
-                                                    }
-
-                                                    if ((cpuidInfo[CPUID_EBX] & (1 << 17)) != 0)                 // AVX512DQ
-                                                    {
-                                                        CPUCompileFlags.Set(InstructionSet_AVX512DQ);
-                                                        if (isAVX512_VLSupported)                          // AVX512DQ_VL
-                                                        {
-                                                            CPUCompileFlags.Set(InstructionSet_AVX512DQ_VL);
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            __cpuidex(cpuidInfo, 0x00000007, 0x00000001);
-                                            if ((cpuidInfo[CPUID_EAX] & (1 << 4)) != 0)                           // AVX-VNNI
-                                            {
-                                                CPUCompileFlags.Set(InstructionSet_AVXVNNI);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_VECTOR512_THROTTLING);
                 }
             }
-
-            if (CLRConfig::GetConfigValue(CLRConfig::INTERNAL_SIMD16ByteOnly) != 0)
+            else if (xarchCpuInfo.ExtendedModelId == 0x06)
             {
-                CPUCompileFlags.Clear(InstructionSet_AVX2);
-            }
-        }
+                if (xarchCpuInfo.Model == 0x06)
+                {
+                    // * Cannon Lake
 
-        if (maxCpuId >= 0x07)
-        {
-            __cpuidex(cpuidInfo, 0x00000007, 0x00000000);
-
-            if ((cpuidInfo[CPUID_EBX] & (1 << 3)) != 0)                                                           // BMI1
-            {
-                CPUCompileFlags.Set(InstructionSet_BMI1);
-            }
-
-            if ((cpuidInfo[CPUID_EBX] & (1 << 8)) != 0)                                                           // BMI2
-            {
-                CPUCompileFlags.Set(InstructionSet_BMI2);
-            }
-
-            if ((cpuidInfo[CPUID_EDX] & (1 << 14)) != 0)
-            {
-                CPUCompileFlags.Set(InstructionSet_X86Serialize);                                            // SERIALIZE
+                    CPUCompileFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_VECTOR512_THROTTLING);
+                }
             }
         }
     }
-
-    __cpuid(cpuidInfo, 0x80000000);
-    uint32_t maxCpuIdEx = static_cast<uint32_t>(cpuidInfo[CPUID_EAX]);
-
-    if (maxCpuIdEx >= 0x80000001)
-    {
-        __cpuid(cpuidInfo, 0x80000001);
-
-        if ((cpuidInfo[CPUID_ECX] & (1 << 5)) != 0)                                                               // LZCNT
-        {
-            CPUCompileFlags.Set(InstructionSet_LZCNT);
-        }
-    }
-
-    if (!CPUCompileFlags.IsSet(InstructionSet_SSE))
-    {
-        EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("SSE is not supported on the processor."));
-    }
-    if (!CPUCompileFlags.IsSet(InstructionSet_SSE2))
-    {
-        EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("SSE2 is not supported on the processor."));
-    }
-#endif // defined(TARGET_X86) || defined(TARGET_AMD64)
-
-#if defined(TARGET_ARM64)
-#if defined(TARGET_UNIX)
-    PAL_GetJitCpuCapabilityFlags(&CPUCompileFlags);
-
-    // For HOST_ARM64, if OS has exposed mechanism to detect CPU capabilities, make sure it has AdvSimd capability.
-    // For other cases i.e. if !HOST_ARM64 but TARGET_ARM64 or HOST_ARM64 but OS doesn't expose way to detect
-    // CPU capabilities, we always enable AdvSimd flags by default.
-    //
-    if (!CPUCompileFlags.IsSet(InstructionSet_AdvSimd))
-    {
-        EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(COR_E_EXECUTIONENGINE, W("AdvSimd is not supported on the processor."));
-    }
-#elif defined(HOST_64BIT)
-    // FP and SIMD support are enabled by default
-    CPUCompileFlags.Set(InstructionSet_ArmBase);
-    CPUCompileFlags.Set(InstructionSet_AdvSimd);
-
-    // PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE (30)
-    if (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE))
-    {
-        CPUCompileFlags.Set(InstructionSet_Aes);
-        CPUCompileFlags.Set(InstructionSet_Sha1);
-        CPUCompileFlags.Set(InstructionSet_Sha256);
-    }
-    // PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE (31)
-    if (IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE))
-    {
-        CPUCompileFlags.Set(InstructionSet_Crc32);
-    }
-
-// Older version of SDK would return false for these intrinsics
-// but make sure we pass the right values to the APIs
-#ifndef PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE
-#define PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE 34
-#endif
-#ifndef PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE
-#define PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE 43
-#endif
-#ifndef PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE
-#define PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE 45
-#endif
-
-    // PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE (34)
-    if (IsProcessorFeaturePresent(PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE))
-    {
-        CPUCompileFlags.Set(InstructionSet_Atomics);
-    }
-
-    // PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE (43)
-    if (IsProcessorFeaturePresent(PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE))
-    {
-        CPUCompileFlags.Set(InstructionSet_Dp);
-    }
-
-    // PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE (45)
-    if (IsProcessorFeaturePresent(PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE))
-    {
-        CPUCompileFlags.Set(InstructionSet_Rcpc);
-    }
-
-#endif // HOST_64BIT
-    if (GetDataCacheZeroIDReg() == 4)
-    {
-        // DCZID_EL0<4> (DZP) indicates whether use of DC ZVA instructions is permitted (0) or prohibited (1).
-        // DCZID_EL0<3:0> (BS) specifies Log2 of the block size in words.
-        //
-        // We set the flag when the instruction is permitted and the block size is 64 bytes.
-        CPUCompileFlags.Set(InstructionSet_Dczva);
-    }
-
-    if (CPUCompileFlags.IsSet(InstructionSet_Atomics))
-    {
-        g_arm64_atomics_present = true;
-    }
-#endif // TARGET_ARM64
-
-    // Now that we've queried the actual hardware support, we need to adjust what is actually supported based
-    // on some externally available config switches that exist so users can test code for downlevel hardware.
-
-#if defined(TARGET_AMD64) || defined(TARGET_X86)
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableHWIntrinsic))
-    {
-        CPUCompileFlags.Clear(InstructionSet_X86Base);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAES))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AES);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX2))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX2);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512F))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512F);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512F_VL))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512F_VL);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512BW))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512BW);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512BW_VL))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512BW_VL);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512CD))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512CD);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512CD_VL))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512CD_VL);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512DQ))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512DQ);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVX512DQ_VL))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVX512DQ_VL);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableAVXVNNI))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AVXVNNI);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableBMI1))
-    {
-        CPUCompileFlags.Clear(InstructionSet_BMI1);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableBMI2))
-    {
-        CPUCompileFlags.Clear(InstructionSet_BMI2);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableFMA))
-    {
-        CPUCompileFlags.Clear(InstructionSet_FMA);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableLZCNT))
-    {
-        CPUCompileFlags.Clear(InstructionSet_LZCNT);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnablePCLMULQDQ))
-    {
-        CPUCompileFlags.Clear(InstructionSet_PCLMULQDQ);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableMOVBE))
-    {
-        CPUCompileFlags.Clear(InstructionSet_MOVBE);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnablePOPCNT))
-    {
-        CPUCompileFlags.Clear(InstructionSet_POPCNT);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE))
-    {
-        CPUCompileFlags.Clear(InstructionSet_SSE);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE2))
-    {
-        CPUCompileFlags.Clear(InstructionSet_SSE2);
-    }
-
-    // We need to additionally check that EXTERNAL_EnableSSE3_4 is set, as that
-    // is a prexisting config flag that controls the SSE3+ ISAs
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE3) || !CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE3_4))
-    {
-        CPUCompileFlags.Clear(InstructionSet_SSE3);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE41))
-    {
-        CPUCompileFlags.Clear(InstructionSet_SSE41);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSE42))
-    {
-        CPUCompileFlags.Clear(InstructionSet_SSE42);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableSSSE3))
-    {
-        CPUCompileFlags.Clear(InstructionSet_SSSE3);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableX86Serialize))
-    {
-        CPUCompileFlags.Clear(InstructionSet_X86Serialize);
-    }
-
-#elif defined(TARGET_ARM64)
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableHWIntrinsic))
-    {
-        CPUCompileFlags.Clear(InstructionSet_ArmBase);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64AdvSimd))
-    {
-        CPUCompileFlags.Clear(InstructionSet_AdvSimd);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Aes))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Aes);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Atomics))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Atomics);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Rcpc))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Rcpc);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Crc32))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Crc32);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Dczva))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Dczva);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Dp))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Dp);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Rdm))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Rdm);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Sha1))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Sha1);
-    }
-
-    if (!CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_EnableArm64Sha256))
-    {
-        CPUCompileFlags.Clear(InstructionSet_Sha256);
-    }
-#endif
-
-#if defined(TARGET_LOONGARCH64)
-    // TODO-LoongArch64: set LoongArch64's InstructionSet features !
-#endif // TARGET_LOONGARCH64
-
-    // These calls are very important as it ensures the flags are consistent with any
-    // removals specified above. This includes removing corresponding 64-bit ISAs
-    // and any other implications such as SSE2 depending on SSE or AdvSimd on ArmBase
-
-    CPUCompileFlags.Set64BitInstructionSetVariants();
-    CPUCompileFlags.EnsureValidInstructionSetSupport();
+#endif // TARGET_X86 || TARGET_AMD64
 
     m_CPUCompileFlags = CPUCompileFlags;
 }
@@ -2174,8 +1883,6 @@ BOOL EEJitManager::LoadJIT()
     if (IsJitLoaded())
         return TRUE;
 
-    SetCpuInfo();
-
     m_storeRichDebugInfo = CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_RichDebugInfo) != 0;
 
     ICorJitCompiler* newJitCompiler = NULL;
@@ -2246,6 +1953,8 @@ BOOL EEJitManager::LoadJIT()
             altJitName = MAKEDLLNAME_W(W("clrjit_unix_x64_x64"));
 #elif defined(TARGET_LOONGARCH64)
             altJitName = MAKEDLLNAME_W(W("clrjit_unix_loongarch64_loongarch64"));
+#elif defined(TARGET_RISCV64)
+            altJitName = MAKEDLLNAME_W(W("clrjit_unix_riscv64_riscv64"));
 #endif
 #endif // TARGET_WINDOWS
 
@@ -2634,7 +2343,7 @@ static size_t GetDefaultReserveForJumpStubs(size_t codeHeapSize)
 {
     LIMITED_METHOD_CONTRACT;
 
-#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
     //
     // Keep a small default reserve at the end of the codeheap for jump stubs. It should reduce
     // chance that we won't be able allocate jump stub because of lack of suitable address space.
@@ -2686,7 +2395,7 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
     bool fAllocatedFromEmergencyJumpStubReserve = false;
 
     size_t allocationSize = pCodeHeap->m_LoaderHeap.AllocMem_TotalSize(initialRequestSize);
-#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
     allocationSize += pCodeHeap->m_LoaderHeap.AllocMem_TotalSize(JUMP_ALLOCATE_SIZE);
 #endif
     pBaseAddr = (BYTE *)pInfo->m_pAllocator->GetCodeHeapInitialBlock(loAddr, hiAddr, (DWORD)allocationSize, &dwSizeAcquiredFromInitialBlock);
@@ -2733,7 +2442,7 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
     // this first allocation is critical as it sets up correctly the loader heap info
     HeapList *pHp = new HeapList;
 
-#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
     pHp->CLRPersonalityRoutine = (BYTE *)pCodeHeap->m_LoaderHeap.AllocMem(JUMP_ALLOCATE_SIZE);
 #else
     // Ensure that the heap has a reserved block of memory and so the GetReservedBytesFree()
@@ -2759,6 +2468,8 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
 
     pHp->mapBase         = ROUND_DOWN_TO_PAGE(pHp->startAddress);  // round down to next lower page align
     pHp->pHdrMap         = (DWORD*)(void*)pJitMetaHeap->AllocMem(S_SIZE_T(nibbleMapSize));
+
+    pHp->pLoaderAllocator = pInfo->m_pAllocator;
 
     LOG((LF_JIT, LL_INFO100,
          "Created new CodeHeap(" FMT_ADDR ".." FMT_ADDR ")\n",
@@ -2886,7 +2597,7 @@ HeapList* EEJitManager::NewCodeHeap(CodeHeapRequestInfo *pInfo, DomainCodeHeapLi
 
     size_t reserveSize = initialRequestSize;
 
-#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#if defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
     reserveSize += JUMP_ALLOCATE_SIZE;
 #endif
 
@@ -4411,8 +4122,6 @@ void EEJitManager::NibbleMapSetUnlocked(HeapList * pHp, TADDR pCode, BOOL bSet)
 #endif // !DACCESS_COMPILE
 
 #if defined(FEATURE_EH_FUNCLETS)
-// Note: This returns the root unwind record (the one that describes the prolog)
-// in cases where there is fragmented unwind.
 PTR_RUNTIME_FUNCTION EEJitManager::LazyGetFunctionEntry(EECodeInfo * pCodeInfo)
 {
     CONTRACTL {
@@ -4441,14 +4150,6 @@ PTR_RUNTIME_FUNCTION EEJitManager::LazyGetFunctionEntry(EECodeInfo * pCodeInfo)
 
         if (RUNTIME_FUNCTION__BeginAddress(pFunctionEntry) <= address && address < RUNTIME_FUNCTION__EndAddress(pFunctionEntry, baseAddress))
         {
-
-#if defined(EXCEPTION_DATA_SUPPORTS_FUNCTION_FRAGMENTS) && (defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
-            // If we might have fragmented unwind, and we're on ARM64/LoongArch64,
-            // make sure to returning the root record,
-            // as the trailing records don't have prolog unwind codes.
-            pFunctionEntry = FindRootEntry(pFunctionEntry, baseAddress);
-#endif
-
             return pFunctionEntry;
         }
     }
@@ -5073,7 +4774,7 @@ void ExecutionManager::AddCodeRange(TADDR          pStartRange,
     } CONTRACTL_END;
 
     ReaderLockHolder rlh;
-    RangeSectionLockState lockState = RangeSectionLockState::ReaderLocked; // 
+    RangeSectionLockState lockState = RangeSectionLockState::ReaderLocked; //
 
     PTR_RangeSection pRange = GetCodeRangeMap()->AllocateRange(Range(pStartRange, pEndRange), pJit, flags, pModule, &lockState);
     if (pRange == NULL)
@@ -5097,7 +4798,7 @@ void ExecutionManager::AddCodeRange(TADDR          pStartRange,
     } CONTRACTL_END;
 
     ReaderLockHolder rlh;
-    RangeSectionLockState lockState = RangeSectionLockState::ReaderLocked; // 
+    RangeSectionLockState lockState = RangeSectionLockState::ReaderLocked; //
 
     PTR_RangeSection pRange = GetCodeRangeMap()->AllocateRange(Range(pStartRange, pEndRange), pJit, flags, pHp, &lockState);
 
@@ -5122,7 +4823,7 @@ void ExecutionManager::AddCodeRange(TADDR          pStartRange,
     } CONTRACTL_END;
 
     ReaderLockHolder rlh;
-    RangeSectionLockState lockState = RangeSectionLockState::ReaderLocked; // 
+    RangeSectionLockState lockState = RangeSectionLockState::ReaderLocked; //
 
     PTR_RangeSection pRange = GetCodeRangeMap()->AllocateRange(Range(pStartRange, pEndRange), pJit, flags, pRangeList, &lockState);
 
@@ -5154,7 +4855,7 @@ void ExecutionManager::DeleteRange(TADDR pStartRange)
         WriterLockHolder wlh;
 
         RangeSectionLockState lockState = RangeSectionLockState::WriteLocked;
-        
+
         GetCodeRangeMap()->CleanupRangeSections(&lockState);
         // Unlike the previous implementation, we no longer attempt to avoid freeing
         // the memory behind the RangeSection here, as we do not support the hosting

@@ -104,6 +104,7 @@ struct BasicBlockList;
 struct FlowEdge;
 struct EHblkDsc;
 struct BBswtDesc;
+struct BBehfDesc;
 
 struct StackEntry
 {
@@ -196,132 +197,6 @@ struct allMemoryKinds
     inline MemoryKindIterator end()
     {
         return MemoryKindIterator(MemoryKindCount);
-    }
-};
-
-// This encapsulates the "exception handling" successors of a block.  That is,
-// if a basic block BB1 occurs in a try block, we consider the first basic block
-// BB2 of the corresponding handler to be an "EH successor" of BB1.  Because we
-// make the conservative assumption that control flow can jump from a try block
-// to its handler at any time, the immediate (regular control flow)
-// predecessor(s) of the first block of a try block are also considered to
-// have the first block of the handler as an EH successor.  This makes variables that
-// are "live-in" to the handler become "live-out" for these try-predecessor block,
-// so that they become live-in to the try -- which we require.
-//
-// This class maintains the minimum amount of state necessary to implement
-// successor iteration. The basic block whose successors are enumerated and
-// the compiler need to be provided by Advance/Current's callers. In addition
-// to iterators, this allows the use of other approaches that are more space
-// efficient.
-class EHSuccessorIterPosition
-{
-    // The number of "regular" (i.e., non-exceptional) successors that remain to
-    // be considered.  If BB1 has successor BB2, and BB2 is the first block of a
-    // try block, then we consider the catch block of BB2's try to be an EH
-    // successor of BB1.  This captures the iteration over the successors of BB1
-    // for this purpose.  (In reverse order; we're done when this field is 0).
-    unsigned m_remainingRegSuccs;
-
-    // The current "regular" successor of "m_block" that we're considering.
-    BasicBlock* m_curRegSucc;
-
-    // The current try block.  If non-null, then the current successor "m_curRegSucc"
-    // is the first block of the handler of this block.  While this try block has
-    // enclosing try's that also start with "m_curRegSucc", the corresponding handlers will be
-    // further EH successors.
-    EHblkDsc* m_curTry;
-
-    // Requires that "m_curTry" is NULL.  Determines whether there is, as
-    // discussed just above, a regular successor that's the first block of a
-    // try; if so, sets "m_curTry" to that try block.  (As noted above, selecting
-    // the try containing the current regular successor as the "current try" may cause
-    // multiple first-blocks of catches to be yielded as EH successors: trys enclosing
-    // the current try are also included if they also start with the current EH successor.)
-    void FindNextRegSuccTry(Compiler* comp, BasicBlock* block);
-
-public:
-    // Constructs a position that "points" to the first EH successor of `block`.
-    EHSuccessorIterPosition(Compiler* comp, BasicBlock* block);
-
-    // Constructs a position that "points" past the last EH successor of `block` ("end" position).
-    EHSuccessorIterPosition() : m_remainingRegSuccs(0), m_curTry(nullptr)
-    {
-    }
-
-    // Go on to the next EH successor.
-    void Advance(Compiler* comp, BasicBlock* block);
-
-    // Returns the current EH successor.
-    // Requires that "*this" is not equal to the "end" position.
-    BasicBlock* Current(Compiler* comp, BasicBlock* block);
-
-    // Returns "true" iff "*this" is equal to "ehsi".
-    bool operator==(const EHSuccessorIterPosition& ehsi)
-    {
-        return m_curTry == ehsi.m_curTry && m_remainingRegSuccs == ehsi.m_remainingRegSuccs;
-    }
-
-    bool operator!=(const EHSuccessorIterPosition& ehsi)
-    {
-        return !((*this) == ehsi);
-    }
-};
-
-// Yields both normal and EH successors (in that order) in one iteration.
-//
-// This class maintains the minimum amount of state necessary to implement
-// successor iteration. The basic block whose successors are enumerated and
-// the compiler need to be provided by Advance/Current's callers. In addition
-// to iterators, this allows the use of other approaches that are more space
-// efficient.
-class AllSuccessorIterPosition
-{
-    // Normal successor position
-    unsigned m_numNormSuccs;
-    unsigned m_remainingNormSucc;
-    // EH successor position
-    EHSuccessorIterPosition m_ehIter;
-
-    // True iff m_blk is a BBJ_CALLFINALLY block, and the current try block of m_ehIter,
-    // the first block of whose handler would be next yielded, is the jump target of m_blk.
-    inline bool CurTryIsBlkCallFinallyTarget(Compiler* comp, BasicBlock* block);
-
-public:
-    // Constructs a position that "points" to the first successor of `block`.
-    inline AllSuccessorIterPosition(Compiler* comp, BasicBlock* block);
-
-    // Constructs a position that "points" past the last successor of `block` ("end" position).
-    AllSuccessorIterPosition() : m_remainingNormSucc(0), m_ehIter()
-    {
-    }
-
-    // Go on to the next successor.
-    inline void Advance(Compiler* comp, BasicBlock* block);
-
-    // Returns the current successor.
-    // Requires that "*this" is not equal to the "end" position.
-    inline BasicBlock* Current(Compiler* comp, BasicBlock* block);
-
-    bool IsCurrentEH()
-    {
-        return m_remainingNormSucc == 0;
-    }
-
-    bool HasCurrent()
-    {
-        return *this != AllSuccessorIterPosition();
-    }
-
-    // Returns "true" iff "*this" is equal to "asi".
-    bool operator==(const AllSuccessorIterPosition& asi)
-    {
-        return (m_remainingNormSucc == asi.m_remainingNormSucc) && (m_ehIter == asi.m_ehIter);
-    }
-
-    bool operator!=(const AllSuccessorIterPosition& asi)
-    {
-        return !((*this) == asi);
     }
 };
 
@@ -481,6 +356,20 @@ public:
     BBArrayIterator end() const;
 };
 
+// BBEhfSuccList: adapter class for forward iteration of BBJ_EHFINALLYRET blocks, using range-based `for`,
+// normally used via BasicBlock::EHFinallyRetSuccs(), e.g.:
+//    for (BasicBlock* const succ : block->EHFinallyRetSuccs()) ...
+//
+class BBEhfSuccList
+{
+    BBehfDesc* m_bbeDesc;
+
+public:
+    BBEhfSuccList(BBehfDesc* bbeDesc);
+    BBArrayIterator begin() const;
+    BBArrayIterator end() const;
+};
+
 //------------------------------------------------------------------------
 // BasicBlockFlags: a bitmask of flags for BasicBlock
 //
@@ -497,7 +386,7 @@ enum BasicBlockFlags : unsigned __int64
     BBF_IMPORTED             = MAKE_BBFLAG( 4), // BB byte-code has been imported
     BBF_INTERNAL             = MAKE_BBFLAG( 5), // BB has been added by the compiler
     BBF_FAILED_VERIFICATION  = MAKE_BBFLAG( 6), // BB has verification exception
-    BBF_TRY_BEG              = MAKE_BBFLAG( 7), // BB starts a 'try' block
+//  BBF_UNUSED               = MAKE_BBFLAG( 7),
     BBF_FUNCLET_BEG          = MAKE_BBFLAG( 8), // BB is the beginning of a funclet
     BBF_CLONED_FINALLY_BEGIN = MAKE_BBFLAG( 9), // First block of a cloned finally region
     BBF_CLONED_FINALLY_END   = MAKE_BBFLAG(10), // Last block of a cloned finally region
@@ -550,6 +439,7 @@ enum BasicBlockFlags : unsigned __int64
     BBF_HAS_HISTOGRAM_PROFILE          = MAKE_BBFLAG(39), // BB contains a call needing a histogram profile
     BBF_TAILCALL_SUCCESSOR             = MAKE_BBFLAG(40), // BB has pred that has potential tail call
     BBF_RECURSIVE_TAILCALL             = MAKE_BBFLAG(41), // Block has recursive tailcall that may turn into a loop
+    BBF_NO_CSE_IN                      = MAKE_BBFLAG(42), // Block should kill off any incoming CSE
 
     // The following are sets of flags.
 
@@ -614,6 +504,12 @@ inline BasicBlockFlags& operator &=(BasicBlockFlags& a, BasicBlockFlags b)
     return a = (BasicBlockFlags)((unsigned __int64)a & (unsigned __int64)b);
 }
 
+enum class BasicBlockVisit
+{
+    Continue,
+    Abort,
+};
+
 // clang-format on
 
 //------------------------------------------------------------------------
@@ -627,16 +523,163 @@ struct BasicBlock : private LIR::Range
 {
     friend class LIR;
 
+private:
     BasicBlock* bbNext; // next BB in ascending PC offset order
     BasicBlock* bbPrev;
 
-    void setNext(BasicBlock* next)
+    BBjumpKinds bbJumpKind; // jump (if any) at the end of this block
+
+    /* The following union describes the jump target(s) of this block */
+    union {
+        unsigned    bbJumpOffs; // PC offset (temporary only)
+        BasicBlock* bbJumpDest; // basic block
+        BBswtDesc*  bbJumpSwt;  // switch descriptor
+        BBehfDesc*  bbJumpEhf;  // BBJ_EHFINALLYRET descriptor
+    };
+
+public:
+    BBjumpKinds GetJumpKind() const
+    {
+        return bbJumpKind;
+    }
+
+    void SetJumpKind(BBjumpKinds jumpKind DEBUG_ARG(Compiler* compiler))
+    {
+#ifdef DEBUG
+        // BBJ_NONE should only be assigned when optimizing jumps in Compiler::optOptimizeLayout
+        // TODO: Change assert to check if compiler is in appropriate optimization phase to use BBJ_NONE
+        // (right now, this assertion does the null check to avoid unused variable warnings)
+        assert((jumpKind != BBJ_NONE) || (compiler != nullptr));
+#endif // DEBUG
+        bbJumpKind = jumpKind;
+    }
+
+    BasicBlock* Prev() const
+    {
+        return bbPrev;
+    }
+
+    void SetPrev(BasicBlock* prev)
+    {
+        bbPrev = prev;
+        if (prev)
+        {
+            prev->bbNext = this;
+        }
+    }
+
+    BasicBlock* Next() const
+    {
+        return bbNext;
+    }
+
+    void SetNext(BasicBlock* next)
     {
         bbNext = next;
         if (next)
         {
             next->bbPrev = this;
         }
+    }
+
+    bool IsFirst() const
+    {
+        return (bbPrev == nullptr);
+    }
+
+    bool IsLast() const
+    {
+        return (bbNext == nullptr);
+    }
+
+    bool PrevIs(const BasicBlock* block) const
+    {
+        return (bbPrev == block);
+    }
+
+    bool NextIs(const BasicBlock* block) const
+    {
+        return (bbNext == block);
+    }
+
+    bool IsLastHotBlock(Compiler* compiler) const;
+
+    bool IsFirstColdBlock(Compiler* compiler) const;
+
+    unsigned GetJumpOffs() const
+    {
+        return bbJumpOffs;
+    }
+
+    void SetJumpOffs(unsigned jumpOffs)
+    {
+        bbJumpOffs = jumpOffs;
+    }
+
+    BasicBlock* GetJumpDest() const
+    {
+        return bbJumpDest;
+    }
+
+    void SetJumpDest(BasicBlock* jumpDest)
+    {
+        bbJumpDest = jumpDest;
+    }
+
+    void SetJumpKindAndTarget(BBjumpKinds jumpKind, BasicBlock* jumpDest)
+    {
+        assert(jumpDest != nullptr);
+        bbJumpKind = jumpKind;
+        bbJumpDest = jumpDest;
+        assert(KindIs(BBJ_ALWAYS, BBJ_CALLFINALLY, BBJ_COND, BBJ_EHCATCHRET, BBJ_LEAVE));
+    }
+
+    bool HasJumpTo(const BasicBlock* jumpDest) const
+    {
+        return (bbJumpDest == jumpDest);
+    }
+
+    bool JumpsToNext() const
+    {
+        return (bbJumpDest == bbNext);
+    }
+
+    BBswtDesc* GetJumpSwt() const
+    {
+        return bbJumpSwt;
+    }
+
+    void SetJumpSwt(BBswtDesc* jumpSwt)
+    {
+        bbJumpSwt = jumpSwt;
+    }
+
+    void SetJumpKindAndTarget(BBjumpKinds jumpKind, BBswtDesc* jumpSwt)
+    {
+        assert(jumpKind == BBJ_SWITCH);
+        assert(jumpSwt != nullptr);
+        bbJumpKind = jumpKind;
+        bbJumpSwt  = jumpSwt;
+    }
+
+    BBehfDesc* GetJumpEhf() const
+    {
+        assert(KindIs(BBJ_EHFINALLYRET));
+        return bbJumpEhf;
+    }
+
+    void SetJumpEhf(BBehfDesc* jumpEhf)
+    {
+        assert(KindIs(BBJ_EHFINALLYRET));
+        bbJumpEhf = jumpEhf;
+    }
+
+    void SetJumpKindAndTarget(BBjumpKinds jumpKind, BBehfDesc* jumpEhf)
+    {
+        assert(jumpKind == BBJ_EHFINALLYRET);
+        assert(jumpEhf != nullptr);
+        bbJumpKind = jumpKind;
+        bbJumpEhf  = jumpEhf;
     }
 
     BasicBlockFlags bbFlags;
@@ -821,15 +864,6 @@ struct BasicBlock : private LIR::Range
     // a block corresponding to an exit from the try of a try/finally.
     bool isBBCallAlwaysPairTail() const;
 
-    BBjumpKinds bbJumpKind; // jump (if any) at the end of this block
-
-    /* The following union describes the jump target(s) of this block */
-    union {
-        unsigned    bbJumpOffs; // PC offset (temporary only)
-        BasicBlock* bbJumpDest; // basic block
-        BBswtDesc*  bbJumpSwt;  // switch descriptor
-    };
-
     bool KindIs(BBjumpKinds kind) const
     {
         return bbJumpKind == kind;
@@ -841,6 +875,11 @@ struct BasicBlock : private LIR::Range
         return KindIs(kind) || KindIs(rest...);
     }
 
+    bool HasTerminator()
+    {
+        return KindIs(BBJ_EHFINALLYRET, BBJ_EHFAULTRET, BBJ_EHFILTERRET, BBJ_COND, BBJ_SWITCH, BBJ_RETURN);
+    }
+
     // NumSucc() gives the number of successors, and GetSucc() returns a given numbered successor.
     //
     // There are two versions of these functions: ones that take a Compiler* and ones that don't. You must
@@ -848,27 +887,14 @@ struct BasicBlock : private LIR::Range
     // GetSucc() without a Compiler*.
     //
     // The behavior of NumSucc()/GetSucc() is different when passed a Compiler* for blocks that end in:
-    // (1) BBJ_EHFINALLYRET (a return from a finally block)
-    // (2) BBJ_EHFILTERRET (a return from EH filter block)
-    // (3) BBJ_SWITCH
-    //
-    // For BBJ_EHFINALLYRET, if no Compiler* is passed, then the block is considered to have no
-    // successor. If Compiler* is passed, we figure out the actual successors. Some cases will want one behavior,
-    // other cases the other. For example, IL verification requires that these blocks end in an empty operand
-    // stack, and since the dataflow analysis of IL verification is concerned only with the contents of the
-    // operand stack, we can consider the finally block to have no successors. But a more general dataflow
-    // analysis that is tracking the contents of local variables might want to consider *all* successors,
-    // and would pass the current Compiler object.
-    //
-    // Similarly, BBJ_EHFILTERRET blocks are assumed to have no successors if Compiler* is not passed; if
-    // Compiler* is passed, NumSucc/GetSucc yields the first block of the try block's handler.
+    // (1) BBJ_SWITCH
     //
     // For BBJ_SWITCH, if Compiler* is not passed, then all switch successors are returned. If Compiler*
     // is passed, then only unique switch successors are returned; the duplicate successors are omitted.
     //
-    // Note that for BBJ_COND, which has two successors (fall through and condition true branch target),
-    // only the unique targets are returned. Thus, if both targets are the same, NumSucc() will only return 1
-    // instead of 2.
+    // Note that for BBJ_COND, which has two successors (fall through (condition false), and condition true
+    // branch target), only the unique targets are returned. Thus, if both targets are the same, NumSucc()
+    // will only return 1 instead of 2.
     //
     // NumSucc: Returns the number of successors of "this".
     unsigned NumSucc() const;
@@ -878,13 +904,23 @@ struct BasicBlock : private LIR::Range
     BasicBlock* GetSucc(unsigned i) const;
     BasicBlock* GetSucc(unsigned i, Compiler* comp);
 
-    // SwitchTargets: convenience methods for enabling range-based `for` iteration over a switch block's targets, e.g.:
+    // SwitchTargets: convenience method for enabling range-based `for` iteration over a switch block's targets, e.g.:
     //    for (BasicBlock* const bTarget : block->SwitchTargets()) ...
     //
     BBSwitchTargetList SwitchTargets() const
     {
         assert(bbJumpKind == BBJ_SWITCH);
         return BBSwitchTargetList(bbJumpSwt);
+    }
+
+    // EHFinallyRetSuccs: convenience method for enabling range-based `for` iteration over BBJ_EHFINALLYRET block
+    // successors, e.g.:
+    //    for (BasicBlock* const succ : block->EHFinallyRetSuccs()) ...
+    //
+    BBEhfSuccList EHFinallyRetSuccs() const
+    {
+        assert(bbJumpKind == BBJ_EHFINALLYRET);
+        return BBEhfSuccList(bbJumpEhf);
     }
 
     BasicBlock* GetUniquePred(Compiler* comp) const;
@@ -1089,15 +1125,13 @@ struct BasicBlock : private LIR::Range
     BlockSet bbReach; // Set of all blocks that can reach this one
 
     union {
-        BasicBlock* bbIDom;   // Represent the closest dominator to this block (called the Immediate
-                              // Dominator) used to compute the dominance tree.
-        FlowEdge* bbLastPred; // Used early on by fgLinkBasicBlock/fgAddRefPred
+        BasicBlock* bbIDom;          // Represent the closest dominator to this block (called the Immediate
+                                     // Dominator) used to compute the dominance tree.
+        FlowEdge* bbLastPred;        // Used early on by fgLinkBasicBlock/fgAddRefPred
+        void*     bbSparseProbeList; // Used early on by fgInstrument
     };
 
-    union {
-        void* bbSparseCountInfo; // Used early on by fgIncorporateEdgeCounts
-        void* bbSparseProbeList; // Used early on by fgInstrument
-    };
+    void* bbSparseCountInfo; // Used early on by fgIncorporateEdgeCounts
 
     unsigned bbPreorderNum;  // the block's  preorder number in the graph (1...fgMaxBBNum]
     unsigned bbPostorderNum; // the block's postorder number in the graph (1...fgMaxBBNum]
@@ -1112,7 +1146,7 @@ struct BasicBlock : private LIR::Range
                                   // BAD_IL_OFFSET.
 #endif                            // DEBUG
 
-    VARSET_TP bbVarUse; // variables used     by block (before an assignment)
+    VARSET_TP bbVarUse; // variables used     by block (before a definition)
     VARSET_TP bbVarDef; // variables assigned by block (before a use)
 
     VARSET_TP bbLiveIn;  // variables live on entry
@@ -1167,17 +1201,17 @@ struct BasicBlock : private LIR::Range
 
     union {
         EXPSET_TP bbCseGen;       // CSEs computed by block
-        ASSERT_TP bbAssertionGen; // value assignments computed by block
+        ASSERT_TP bbAssertionGen; // assertions computed by block
     };
 
     union {
         EXPSET_TP bbCseIn;       // CSEs available on entry
-        ASSERT_TP bbAssertionIn; // value assignments available on entry
+        ASSERT_TP bbAssertionIn; // assertions available on entry
     };
 
     union {
         EXPSET_TP bbCseOut;       // CSEs available on exit
-        ASSERT_TP bbAssertionOut; // value assignments available on exit
+        ASSERT_TP bbAssertionOut; // assertions available on exit
     };
 
     void* bbEmitCookie;
@@ -1230,7 +1264,7 @@ struct BasicBlock : private LIR::Range
 #endif // DEBUG
 
     unsigned bbStackDepthOnEntry() const;
-    void bbSetStack(void* stackBuffer);
+    void bbSetStack(StackEntry* stack);
     StackEntry* bbStackOnEntry() const;
 
     // "bbNum" is one-based (for unknown reasons); it is sometimes useful to have the corresponding
@@ -1243,6 +1277,7 @@ struct BasicBlock : private LIR::Range
 
     Statement* firstStmt() const;
     Statement* lastStmt() const;
+    bool       hasSingleStmt() const;
 
     // Statements: convenience method for enabling range-based `for` iteration over the statement list, e.g.:
     //    for (Statement* const stmt : block->Statements())
@@ -1275,9 +1310,9 @@ struct BasicBlock : private LIR::Range
     bool endsWithTailCallConvertibleToLoop(Compiler* comp, GenTree** tailCall) const;
 
     // Returns the first statement in the statement list of "this" that is
-    // not an SSA definition (a lcl = phi(...) assignment).
+    // not an SSA definition (a lcl = phi(...) store).
     Statement* FirstNonPhiDef() const;
-    Statement* FirstNonPhiDefOrCatchArgAsg() const;
+    Statement* FirstNonPhiDefOrCatchArgStore() const;
 
     BasicBlock() : bbStmtList(nullptr), bbLiveIn(VarSetOps::UninitVal()), bbLiveOut(VarSetOps::UninitVal())
     {
@@ -1342,15 +1377,16 @@ struct BasicBlock : private LIR::Range
         }
     };
 
-    Successors<EHSuccessorIterPosition> GetEHSuccs(Compiler* comp)
-    {
-        return Successors<EHSuccessorIterPosition>(comp, this);
-    }
+    template <typename TFunc>
+    BasicBlockVisit VisitEHSecondPassSuccs(Compiler* comp, TFunc func);
 
-    Successors<AllSuccessorIterPosition> GetAllSuccs(Compiler* comp)
-    {
-        return Successors<AllSuccessorIterPosition>(comp, this);
-    }
+    template <typename TFunc>
+    BasicBlockVisit VisitAllSuccs(Compiler* comp, TFunc func);
+
+    template <typename TFunc>
+    BasicBlockVisit VisitRegularSuccs(Compiler* comp, TFunc func);
+
+    bool HasPotentialEHSuccs(Compiler* comp);
 
     // BBSuccList: adapter class for forward iteration of block successors, using range-based `for`,
     // normally used via BasicBlock::Succs(), e.g.:
@@ -1531,10 +1567,10 @@ public:
     {
         assert(m_block != nullptr);
         // Check that we haven't been spliced out of the list.
-        assert((m_block->bbNext == nullptr) || (m_block->bbNext->bbPrev == m_block));
-        assert((m_block->bbPrev == nullptr) || (m_block->bbPrev->bbNext == m_block));
+        assert(m_block->IsLast() || m_block->Next()->PrevIs(m_block));
+        assert(m_block->IsFirst() || m_block->Prev()->NextIs(m_block));
 
-        m_block = m_block->bbNext;
+        m_block = m_block->Next();
         return *this;
     }
 
@@ -1597,7 +1633,7 @@ public:
 
     BasicBlockIterator end() const
     {
-        return BasicBlockIterator(m_end->bbNext); // walk until we see the block *following* the `m_end` block
+        return BasicBlockIterator(m_end->Next()); // walk until we see the block *following* the `m_end` block
     }
 };
 
@@ -1665,18 +1701,49 @@ inline BBArrayIterator BBSwitchTargetList::end() const
     return BBArrayIterator(m_bbsDesc->bbsDstTab + m_bbsDesc->bbsCount);
 }
 
+// BBehfDesc -- descriptor for a BBJ_EHFINALLYRET block
+//
+struct BBehfDesc
+{
+    BasicBlock** bbeSuccs; // array of `BasicBlock*` pointing to BBJ_EHFINALLYRET block successors
+    unsigned     bbeCount; // size of `bbeSuccs` array
+
+    BBehfDesc() : bbeSuccs(nullptr), bbeCount(0)
+    {
+    }
+
+    BBehfDesc(Compiler* comp, const BBehfDesc* other);
+};
+
+// BBEhfSuccList out-of-class-declaration implementations (here due to C++ ordering requirements).
+//
+
+inline BBEhfSuccList::BBEhfSuccList(BBehfDesc* bbeDesc) : m_bbeDesc(bbeDesc)
+{
+    assert(m_bbeDesc != nullptr);
+    assert((m_bbeDesc->bbeSuccs != nullptr) || (m_bbeDesc->bbeCount == 0));
+}
+
+inline BBArrayIterator BBEhfSuccList::begin() const
+{
+    return BBArrayIterator(m_bbeDesc->bbeSuccs);
+}
+
+inline BBArrayIterator BBEhfSuccList::end() const
+{
+    return BBArrayIterator(m_bbeDesc->bbeSuccs + m_bbeDesc->bbeCount);
+}
+
 // BBSuccList out-of-class-declaration implementations
 //
 inline BasicBlock::BBSuccList::BBSuccList(const BasicBlock* block)
 {
     assert(block != nullptr);
-    switch (block->bbJumpKind)
+    switch (block->GetJumpKind())
     {
         case BBJ_THROW:
         case BBJ_RETURN:
-        case BBJ_EHFINALLYRET:
         case BBJ_EHFAULTRET:
-        case BBJ_EHFILTERRET:
             // We don't need m_succs.
             m_begin = nullptr;
             m_end   = nullptr;
@@ -1685,41 +1752,58 @@ inline BasicBlock::BBSuccList::BBSuccList(const BasicBlock* block)
         case BBJ_CALLFINALLY:
         case BBJ_ALWAYS:
         case BBJ_EHCATCHRET:
+        case BBJ_EHFILTERRET:
         case BBJ_LEAVE:
-            m_succs[0] = block->bbJumpDest;
+            m_succs[0] = block->GetJumpDest();
             m_begin    = &m_succs[0];
             m_end      = &m_succs[1];
             break;
 
         case BBJ_NONE:
-            m_succs[0] = block->bbNext;
+            m_succs[0] = block->Next();
             m_begin    = &m_succs[0];
             m_end      = &m_succs[1];
             break;
 
         case BBJ_COND:
-            m_succs[0] = block->bbNext;
+            m_succs[0] = block->Next();
             m_begin    = &m_succs[0];
 
             // If both fall-through and branch successors are identical, then only include
             // them once in the iteration (this is the same behavior as NumSucc()/GetSucc()).
-            if (block->bbJumpDest == block->bbNext)
+            if (block->JumpsToNext())
             {
                 m_end = &m_succs[1];
             }
             else
             {
-                m_succs[1] = block->bbJumpDest;
+                m_succs[1] = block->GetJumpDest();
                 m_end      = &m_succs[2];
+            }
+            break;
+
+        case BBJ_EHFINALLYRET:
+            // We don't use the m_succs in-line data; use the existing successor table in the block.
+            // We must tolerate iterating successors early in the system, before EH_FINALLYRET successors have
+            // been computed.
+            if (block->GetJumpEhf() == nullptr)
+            {
+                m_begin = nullptr;
+                m_end   = nullptr;
+            }
+            else
+            {
+                m_begin = block->GetJumpEhf()->bbeSuccs;
+                m_end   = block->GetJumpEhf()->bbeSuccs + block->GetJumpEhf()->bbeCount;
             }
             break;
 
         case BBJ_SWITCH:
             // We don't use the m_succs in-line data for switches; use the existing jump table in the block.
-            assert(block->bbJumpSwt != nullptr);
-            assert(block->bbJumpSwt->bbsDstTab != nullptr);
-            m_begin = block->bbJumpSwt->bbsDstTab;
-            m_end   = block->bbJumpSwt->bbsDstTab + block->bbJumpSwt->bbsCount;
+            assert(block->GetJumpSwt() != nullptr);
+            assert(block->GetJumpSwt()->bbsDstTab != nullptr);
+            m_begin = block->GetJumpSwt()->bbsDstTab;
+            m_end   = block->GetJumpSwt()->bbsDstTab + block->GetJumpSwt()->bbsCount;
             break;
 
         default:
@@ -1980,72 +2064,25 @@ inline PredBlockList::iterator& PredBlockList::iterator::operator++()
 
 void* emitCodeGetCookie(BasicBlock* block);
 
-AllSuccessorIterPosition::AllSuccessorIterPosition(Compiler* comp, BasicBlock* block)
-    : m_numNormSuccs(block->NumSucc(comp)), m_remainingNormSucc(m_numNormSuccs), m_ehIter(comp, block)
-{
-    if (CurTryIsBlkCallFinallyTarget(comp, block))
-    {
-        m_ehIter.Advance(comp, block);
-    }
-}
-
-bool AllSuccessorIterPosition::CurTryIsBlkCallFinallyTarget(Compiler* comp, BasicBlock* block)
-{
-    return (block->bbJumpKind == BBJ_CALLFINALLY) && (m_ehIter != EHSuccessorIterPosition()) &&
-           (block->bbJumpDest == m_ehIter.Current(comp, block));
-}
-
-void AllSuccessorIterPosition::Advance(Compiler* comp, BasicBlock* block)
-{
-    if (m_remainingNormSucc > 0)
-    {
-        m_remainingNormSucc--;
-    }
-    else
-    {
-        m_ehIter.Advance(comp, block);
-
-        // If the original block whose successors we're iterating over
-        // is a BBJ_CALLFINALLY, that finally clause's first block
-        // will be yielded as a normal successor.  Don't also yield as
-        // an exceptional successor.
-        if (CurTryIsBlkCallFinallyTarget(comp, block))
-        {
-            m_ehIter.Advance(comp, block);
-        }
-    }
-}
-
-// Requires that "this" is not equal to the standard "end" iterator.  Returns the
-// current successor.
-BasicBlock* AllSuccessorIterPosition::Current(Compiler* comp, BasicBlock* block)
-{
-    if (m_remainingNormSucc > 0)
-    {
-        return block->GetSucc(m_numNormSuccs - m_remainingNormSucc, comp);
-    }
-    else
-    {
-        return m_ehIter.Current(comp, block);
-    }
-}
-
-typedef BasicBlock::Successors<EHSuccessorIterPosition>::iterator  EHSuccessorIter;
-typedef BasicBlock::Successors<AllSuccessorIterPosition>::iterator AllSuccessorIter;
-
 // An enumerator of a block's all successors. In some cases (e.g. SsaBuilder::TopologicalSort)
 // using iterators is not exactly efficient, at least because they contain an unnecessary
 // member - a pointer to the Compiler object.
 class AllSuccessorEnumerator
 {
-    BasicBlock*              m_block;
-    AllSuccessorIterPosition m_pos;
+    BasicBlock* m_block;
+    union {
+        // We store up to 4 successors inline in the enumerator. For ASP.NET
+        // and libraries.pmi this is enough in 99.7% of cases.
+        BasicBlock*  m_successors[4];
+        BasicBlock** m_pSuccessors;
+    };
+
+    unsigned m_numSuccs;
+    unsigned m_curSucc = UINT_MAX;
 
 public:
     // Constructs an enumerator of all `block`'s successors.
-    AllSuccessorEnumerator(Compiler* comp, BasicBlock* block) : m_block(block), m_pos(comp, block)
-    {
-    }
+    AllSuccessorEnumerator(Compiler* comp, BasicBlock* block);
 
     // Gets the block whose successors are enumerated.
     BasicBlock* Block()
@@ -2053,23 +2090,21 @@ public:
         return m_block;
     }
 
-    // Returns true if the next successor is an EH successor.
-    bool IsNextEHSuccessor()
-    {
-        return m_pos.IsCurrentEH();
-    }
-
     // Returns the next available successor or `nullptr` if there are no more successors.
     BasicBlock* NextSuccessor(Compiler* comp)
     {
-        if (!m_pos.HasCurrent())
+        m_curSucc++;
+        if (m_curSucc >= m_numSuccs)
         {
             return nullptr;
         }
 
-        BasicBlock* succ = m_pos.Current(comp, m_block);
-        m_pos.Advance(comp, m_block);
-        return succ;
+        if (m_numSuccs <= ArrLen(m_successors))
+        {
+            return m_successors[m_curSucc];
+        }
+
+        return m_pSuccessors[m_curSucc];
     }
 };
 

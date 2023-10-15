@@ -458,7 +458,7 @@ namespace System.Reflection.Emit
             }
 
             Debug.Assert(method is RuntimeMethodInfo || method is RuntimeConstructorInfo);
-            ParameterInfo[] parameters = method.GetParametersNoCopy();
+            ReadOnlySpan<ParameterInfo> parameters = method.GetParametersAsSpan();
 
             Type[] parameterTypes = new Type[parameters.Length];
             Type[][] requiredCustomModifiers = new Type[parameterTypes.Length][];
@@ -542,19 +542,19 @@ namespace System.Reflection.Emit
             return typeList;
         }
 
-        [RequiresUnreferencedCode("Types might be removed")]
+        [RequiresUnreferencedCode("Types might be removed by trimming. If the type name is a string literal, consider using Type.GetType instead.")]
         public override Type? GetType(string className)
         {
             return GetType(className, false, false);
         }
 
-        [RequiresUnreferencedCode("Types might be removed")]
+        [RequiresUnreferencedCode("Types might be removed by trimming. If the type name is a string literal, consider using Type.GetType instead.")]
         public override Type? GetType(string className, bool ignoreCase)
         {
             return GetType(className, false, ignoreCase);
         }
 
-        [RequiresUnreferencedCode("Types might be removed")]
+        [RequiresUnreferencedCode("Types might be removed by trimming. If the type name is a string literal, consider using Type.GetType instead.")]
         public override Type? GetType(string className, bool throwOnError, bool ignoreCase)
         {
             lock (SyncRoot)
@@ -1289,18 +1289,13 @@ namespace System.Reflection.Emit
 
         #region Other
 
-        protected override void SetCustomAttributeCore(ConstructorInfo con, byte[] binaryAttribute)
+        protected override void SetCustomAttributeCore(ConstructorInfo con, ReadOnlySpan<byte> binaryAttribute)
         {
             RuntimeTypeBuilder.DefineCustomAttribute(
                 this,
                 1,                                          // This is hard coding the module token to 1
                 GetMethodMetadataToken(con),
                 binaryAttribute);
-        }
-
-        protected override void SetCustomAttributeCore(CustomAttributeBuilder customBuilder)
-        {
-            customBuilder.CreateCustomAttribute(this, 1);   // This is hard coding the module token to 1
         }
 
         #endregion

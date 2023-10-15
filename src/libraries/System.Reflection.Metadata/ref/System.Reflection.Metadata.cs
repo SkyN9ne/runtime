@@ -3064,6 +3064,7 @@ namespace System.Reflection.Metadata.Ecma335
         public void String() { }
         public System.Reflection.Metadata.Ecma335.SignatureTypeEncoder SZArray() { throw null; }
         public void Type(System.Reflection.Metadata.EntityHandle type, bool isValueType) { }
+        public void TypedReference() { }
         public void UInt16() { }
         public void UInt32() { }
         public void UInt64() { }
@@ -3292,6 +3293,9 @@ namespace System.Reflection.PortableExecutable
         Arm64 = (ushort)43620,
         LoongArch32 = (ushort)25138,
         LoongArch64 = (ushort)25188,
+        RiscV32 = (ushort)20530,
+        RiscV64 = (ushort)20580,
+        RiscV128 = (ushort)20776,
     }
     public partial class ManagedPEBuilder : System.Reflection.PortableExecutable.PEBuilder
     {

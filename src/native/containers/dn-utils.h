@@ -14,9 +14,12 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+// included unconditionally for static_assert macro on C11
+#include <assert.h>
 
 #if defined(_DEBUG)
-#include <assert.h>
 #define DN_ASSERT(x) assert(x)
 #else
 #define DN_ASSERT(x)
@@ -46,10 +49,7 @@
 
 #define DN_UNREFERENCED_PARAMETER(expr) (void)(expr)
 
-// Until C11 support, use typedef expression for static assertion.
-#define _DN_STATIC_ASSERT_UNQIUE_TYPEDEF0(line) __dn_static_assert_ ## line ## _t
-#define _DN_STATIC_ASSERT_UNQIUE_TYPEDEF(line) _DN_STATIC_ASSERT_UNQIUE_TYPEDEF0(line)
-#define _DN_STATIC_ASSERT(expr) typedef char _DN_STATIC_ASSERT_UNQIUE_TYPEDEF(__LINE__)[(expr) != 0]
+#define _DN_STATIC_ASSERT(expr) static_assert(expr, "")
 
 static inline bool
 dn_safe_size_t_multiply (size_t lhs, size_t rhs, size_t *result)

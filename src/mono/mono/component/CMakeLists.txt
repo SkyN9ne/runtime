@@ -27,6 +27,8 @@ set(${MONO_DEBUGGER_COMPONENT_NAME}-sources
   ${MONO_COMPONENT_PATH}/debugger.h
   ${MONO_COMPONENT_PATH}/debugger-networking.c
   ${MONO_COMPONENT_PATH}/debugger-networking.h
+  ${MONO_COMPONENT_PATH}/debugger-poll.c
+  ${MONO_COMPONENT_PATH}/debugger-poll.h
   ${MONO_COMPONENT_PATH}/debugger-agent.c
   ${MONO_COMPONENT_PATH}/debugger-agent.h
   ${MONO_COMPONENT_PATH}/debugger-engine.c
@@ -192,7 +194,7 @@ if(NOT DISABLE_COMPONENTS AND NOT STATIC_COMPONENTS)
       target_link_libraries("mono-component-${component}" PRIVATE monosgen-shared)
     endif()
     target_link_libraries("mono-component-${component}" PRIVATE ${OS_LIBS})
-    install(TARGETS "mono-component-${component}" LIBRARY)
+    install_with_stripped_symbols("mono-component-${component}" TARGETS lib)
   endforeach()
 
   #define a library for each component and component stub

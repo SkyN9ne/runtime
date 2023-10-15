@@ -2,10 +2,6 @@
 
 set -e
 
-# bump the dotnet sdk version to get msbuild bugfix: https://github.com/dotnet/msbuild/issues/8531
-# TODO: remove once we're on a newer sdk in global.json
-sed -i 's/8.0.100-preview.1.23115.2/8.0.100-preview.3.23159.20/g' global.json || true
-
 opt=$1
 case "$opt" in
 
@@ -23,7 +19,7 @@ case "$opt" in
         ./build.sh mono+libs -os browser -c Release
 
         # install dotnet-serve for running wasm samples
-        ./dotnet.sh tool install dotnet-serve --tool-path ./.dotnet-tools-global
+        ./dotnet.sh tool install dotnet-serve --version 1.10.172 --tool-path ./.dotnet-tools-global
     ;;
 esac
 

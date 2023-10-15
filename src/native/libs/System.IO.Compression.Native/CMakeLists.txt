@@ -32,6 +32,8 @@ if (CLR_CMAKE_TARGET_UNIX OR CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
     if (CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
         include(${CLR_SRC_NATIVE_DIR}/external/zlib.cmake)
         add_definitions(-DINTERNAL_ZLIB)
+        set_source_files_properties(${ZLIB_SOURCES} PROPERTIES COMPILE_DEFINITIONS "${ZLIB_COMPILE_DEFINITIONS}")
+        set_source_files_properties(${ZLIB_SOURCES} PROPERTIES COMPILE_OPTIONS "${ZLIB_COMPILE_OPTIONS}")
         set(NATIVECOMPRESSION_SOURCES ${ZLIB_SOURCES} ${NATIVECOMPRESSION_SOURCES})
     endif()
 
@@ -104,11 +106,14 @@ else ()
 
     if (CLR_CMAKE_HOST_ARCH_I386 OR CLR_CMAKE_HOST_ARCH_AMD64)
         include(${CLR_SRC_NATIVE_DIR}/external/zlib-intel.cmake)
+        add_definitions(-DINTERNAL_ZLIB_INTEL)
     else ()
         include(${CLR_SRC_NATIVE_DIR}/external/zlib.cmake)
     endif ()
 
     add_definitions(-DINTERNAL_ZLIB)
+    set_source_files_properties(${ZLIB_SOURCES} PROPERTIES COMPILE_DEFINITIONS "${ZLIB_COMPILE_DEFINITIONS}")
+    set_source_files_properties(${ZLIB_SOURCES} PROPERTIES COMPILE_OPTIONS "${ZLIB_COMPILE_OPTIONS}")
     set(NATIVECOMPRESSION_SOURCES ${ZLIB_SOURCES} ${NATIVECOMPRESSION_SOURCES})
 
     if (GEN_SHARED_LIB)
@@ -135,14 +140,14 @@ else ()
             STATIC
             ${NATIVECOMPRESSION_SOURCES}
         )
-        target_compile_options(System.IO.Compression.Native.Aot PRIVATE /guard:cf-)
-        target_compile_options(System.IO.Compression.Native.Aot PRIVATE /GL-)
+        set_target_properties(System.IO.Compression.Native.Aot PROPERTIES CLR_CONTROL_FLOW_GUARD OFF)
+        set_target_properties(System.IO.Compression.Native.Aot PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
 
         add_library(System.IO.Compression.Native.Aot.GuardCF
             STATIC
             ${NATIVECOMPRESSION_SOURCES}
         )
-        target_compile_options(System.IO.Compression.Native.Aot.GuardCF PRIVATE /GL-)
+        set_target_properties(System.IO.Compression.Native.Aot.GuardCF PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     endif()
 
     if (GEN_SHARED_LIB)

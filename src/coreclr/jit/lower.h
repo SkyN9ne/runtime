@@ -23,7 +23,11 @@ class Lowering final : public Phase
 {
 public:
     inline Lowering(Compiler* compiler, LinearScanInterface* lsra)
-        : Phase(compiler, PHASE_LOWERING), vtableCallTemp(BAD_VAR_NUM)
+        : Phase(compiler, PHASE_LOWERING)
+        , vtableCallTemp(BAD_VAR_NUM)
+#ifdef TARGET_ARM64
+        , m_blockIndirs(compiler->getAllocator(CMK_ArrayStack))
+#endif
     {
         m_lsra = (LinearScan*)lsra;
         assert(m_lsra);
@@ -81,7 +85,6 @@ private:
 
     void ContainCheckDivOrMod(GenTreeOp* node);
     void ContainCheckReturnTrap(GenTreeOp* node);
-    void ContainCheckArrOffset(GenTreeArrOffs* node);
     void ContainCheckLclHeap(GenTreeOp* node);
     void ContainCheckRet(GenTreeUnOp* ret);
 #ifdef TARGET_ARM64
@@ -89,7 +92,10 @@ private:
     insCflags TruthifyingFlags(GenCondition cond);
     void ContainCheckConditionalCompare(GenTreeCCMP* ccmp);
     void ContainCheckNeg(GenTreeOp* neg);
-    void TryLowerCselToCinc(GenTreeOp* select, GenTree* cond);
+    void TryLowerCnsIntCselToCinc(GenTreeOp* select, GenTree* cond);
+    void TryLowerCselToCSOp(GenTreeOp* select, GenTree* cond);
+    GenTree* TryLowerAddSubToMulLongOp(GenTreeOp* op);
+    GenTree* TryLowerNegToMulLongOp(GenTreeOp* op);
 #endif
     void ContainCheckSelect(GenTreeOp* select);
     void ContainCheckBitCast(GenTree* node);
@@ -110,6 +116,9 @@ private:
 #ifdef FEATURE_HW_INTRINSICS
     void ContainCheckHWIntrinsicAddr(GenTreeHWIntrinsic* node, GenTree* addr);
     void ContainCheckHWIntrinsic(GenTreeHWIntrinsic* node);
+#ifdef TARGET_XARCH
+    void TryFoldCnsVecForEmbeddedBroadcast(GenTreeHWIntrinsic* parentNode, GenTreeVecCon* childNode);
+#endif // TARGET_XARCH
 #endif // FEATURE_HW_INTRINSICS
 
 #ifdef DEBUG
@@ -128,8 +137,8 @@ private:
     // Call Lowering
     // ------------------------------
     GenTree* LowerCall(GenTree* call);
-    GenTree* LowerCallMemmove(GenTreeCall* call);
-    GenTree* LowerCallMemcmp(GenTreeCall* call);
+    bool LowerCallMemmove(GenTreeCall* call, GenTree** next);
+    bool LowerCallMemcmp(GenTreeCall* call, GenTree** next);
     void LowerCFGCall(GenTreeCall* call);
     void MoveCFGCallArg(GenTreeCall* call, GenTree* node);
 #ifndef TARGET_64BIT
@@ -192,7 +201,7 @@ private:
 
     GenTree* Ind(GenTree* tree, var_types type = TYP_I_IMPL)
     {
-        return comp->gtNewOperNode(GT_IND, type, tree);
+        return comp->gtNewIndir(type, tree);
     }
 
     GenTree* PhysReg(regNumber reg, var_types type = TYP_I_IMPL)
@@ -264,7 +273,7 @@ private:
     // operands.
     //
     // Arguments:
-    //     tree  -             Gentree of a binary operation.
+    //     tree  -             GenTree of a binary operation.
     //     isSafeToMarkOp1     True if it's safe to mark op1 as register optional
     //     isSafeToMarkOp2     True if it's safe to mark op2 as register optional
     //
@@ -305,14 +314,19 @@ private:
 
     // Per tree node member functions
     void LowerStoreIndirCommon(GenTreeStoreInd* ind);
-    void LowerIndir(GenTreeIndir* ind);
+    GenTree* LowerIndir(GenTreeIndir* ind);
+    bool OptimizeForLdp(GenTreeIndir* ind);
+    bool TryMakeIndirsAdjacent(GenTreeIndir* prevIndir, GenTreeIndir* indir);
+    void MarkTree(GenTree* root);
+    void UnmarkTree(GenTree* root);
     void LowerStoreIndir(GenTreeStoreInd* node);
+    void LowerStoreIndirCoalescing(GenTreeStoreInd* node);
     GenTree* LowerAdd(GenTreeOp* node);
     GenTree* LowerMul(GenTreeOp* mul);
     bool TryLowerAndNegativeOne(GenTreeOp* node, GenTree** nextNode);
     GenTree* LowerBinaryArithmetic(GenTreeOp* binOp);
     bool LowerUnsignedDivOrMod(GenTreeOp* divMod);
-    GenTree* LowerConstIntDivOrMod(GenTree* node);
+    bool TryLowerConstIntDivOrMod(GenTree* node, GenTree** nextNode);
     GenTree* LowerSignedDivOrMod(GenTree* node);
     void LowerBlockStore(GenTreeBlk* blkNode);
     void LowerBlockStoreCommon(GenTreeBlk* blkNode);
@@ -346,7 +360,6 @@ private:
     void WidenSIMD12IfNecessary(GenTreeLclVarCommon* node);
     bool CheckMultiRegLclVar(GenTreeLclVar* lclNode, int registerCount);
     void LowerStoreLoc(GenTreeLclVarCommon* tree);
-    GenTree* LowerArrElem(GenTreeArrElem* arrElem);
     void LowerRotate(GenTree* tree);
     void LowerShift(GenTreeOp* shift);
 #ifdef FEATURE_HW_INTRINSICS
@@ -357,8 +370,8 @@ private:
     GenTree* LowerHWIntrinsicDot(GenTreeHWIntrinsic* node);
 #if defined(TARGET_XARCH)
     void LowerFusedMultiplyAdd(GenTreeHWIntrinsic* node);
-    void LowerHWIntrinsicToScalar(GenTreeHWIntrinsic* node);
-    void LowerHWIntrinsicGetElement(GenTreeHWIntrinsic* node);
+    GenTree* LowerHWIntrinsicToScalar(GenTreeHWIntrinsic* node);
+    GenTree* LowerHWIntrinsicGetElement(GenTreeHWIntrinsic* node);
     GenTree* LowerHWIntrinsicCndSel(GenTreeHWIntrinsic* node);
     GenTree* LowerHWIntrinsicWithElement(GenTreeHWIntrinsic* node);
     GenTree* TryLowerAndOpToResetLowestSetBit(GenTreeOp* andNode);
@@ -474,7 +487,7 @@ public:
     }
 
 #ifdef TARGET_ARM64
-    bool IsContainableBinaryOp(GenTree* parentNode, GenTree* childNode) const;
+    bool IsContainableUnaryOrBinaryOp(GenTree* parentNode, GenTree* childNode) const;
 #endif // TARGET_ARM64
 
 #if defined(FEATURE_HW_INTRINSICS)
@@ -554,6 +567,21 @@ private:
 
 #ifdef FEATURE_FIXED_OUT_ARGS
     unsigned m_outgoingArgSpaceSize = 0;
+#endif
+
+#ifdef TARGET_ARM64
+    struct SavedIndir
+    {
+        GenTreeIndir*  Indir;
+        GenTreeLclVar* AddrBase;
+        target_ssize_t Offset;
+
+        SavedIndir(GenTreeIndir* indir, GenTreeLclVar* addrBase, target_ssize_t offset)
+            : Indir(indir), AddrBase(addrBase), Offset(offset)
+        {
+        }
+    };
+    ArrayStack<SavedIndir> m_blockIndirs;
 #endif
 };
 

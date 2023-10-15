@@ -187,6 +187,7 @@ namespace System.Net
         ExpectationFailed = 417,
         MisdirectedRequest = 421,
         UnprocessableEntity = 422,
+        UnprocessableContent = 422,
         Locked = 423,
         FailedDependency = 424,
         UpgradeRequired = 426,
@@ -265,6 +266,7 @@ namespace System.Net
         public override string ToString() { throw null; }
         string IFormattable.ToString(string? format, IFormatProvider? formatProvider) { throw null; }
         public bool TryFormat(System.Span<char> destination, out int charsWritten) { throw null; }
+        public bool TryFormat(System.Span<byte> utf8Destination, out int bytesWritten) { throw null; }
         bool ISpanFormattable.TryFormat(Span<char> destination, out int charsWritten, ReadOnlySpan<char> format, IFormatProvider? provider) { throw null; }
         bool System.IUtf8SpanFormattable.TryFormat(System.Span<byte> utf8Destination, out int bytesWritten, System.ReadOnlySpan<char> format, System.IFormatProvider? provider) { throw null; }
         public static bool TryParse(System.ReadOnlySpan<char> ipSpan, [System.Diagnostics.CodeAnalysis.NotNullWhenAttribute(true)] out System.Net.IPAddress? address) { throw null; }
@@ -316,6 +318,7 @@ namespace System.Net
         static bool System.ISpanParsable<System.Net.IPNetwork>.TryParse(System.ReadOnlySpan<char> s, System.IFormatProvider? provider, out System.Net.IPNetwork result) { throw null; }
         public override string ToString() { throw null; }
         public bool TryFormat(System.Span<char> destination, out int charsWritten) { throw null; }
+        public bool TryFormat(System.Span<byte> utf8Destination, out int bytesWritten) { throw null; }
         public static bool TryParse(System.ReadOnlySpan<char> s, out System.Net.IPNetwork result) { throw null; }
         public static bool TryParse(string? s, out System.Net.IPNetwork result) { throw null; }
     }
@@ -346,14 +349,17 @@ namespace System.Net
         public System.Net.NetworkCredential GetCredential(string? host, int port, string? authenticationType) { throw null; }
         public System.Net.NetworkCredential GetCredential(System.Uri? uri, string? authenticationType) { throw null; }
     }
-    public partial class SocketAddress
+    public partial class SocketAddress : System.IEquatable<System.Net.SocketAddress>
     {
         public SocketAddress(System.Net.Sockets.AddressFamily family) { }
         public SocketAddress(System.Net.Sockets.AddressFamily family, int size) { }
         public System.Net.Sockets.AddressFamily Family { get { throw null; } }
         public byte this[int offset] { get { throw null; } set { } }
-        public int Size { get { throw null; } }
+        public int Size { get { throw null; } set { } }
+        public static int GetMaximumAddressSize(System.Net.Sockets.AddressFamily addressFamily) { throw null; }
+        public System.Memory<byte> Buffer { get { throw null; } }
         public override bool Equals(object? comparand) { throw null; }
+        public bool Equals(System.Net.SocketAddress? comparand) { throw null; }
         public override int GetHashCode() { throw null; }
         public override string ToString() { throw null; }
     }

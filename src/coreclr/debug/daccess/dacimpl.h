@@ -1211,6 +1211,10 @@ public:
     virtual HRESULT STDMETHODCALLTYPE GetDomainLoaderAllocator(CLRDATA_ADDRESS domainAddress, CLRDATA_ADDRESS *pLoaderAllocator);
     virtual HRESULT STDMETHODCALLTYPE GetLoaderAllocatorHeapNames(int count, const char **ppNames, int *pNeeded);
     virtual HRESULT STDMETHODCALLTYPE GetLoaderAllocatorHeaps(CLRDATA_ADDRESS loaderAllocator, int count, CLRDATA_ADDRESS *pLoaderHeaps, LoaderHeapKind *pKinds, int *pNeeded);
+    virtual HRESULT STDMETHODCALLTYPE GetHandleTableMemoryRegions(ISOSMemoryEnum **ppEnum);
+    virtual HRESULT STDMETHODCALLTYPE GetGCBookkeepingMemoryRegions(ISOSMemoryEnum **ppEnum);
+    virtual HRESULT STDMETHODCALLTYPE GetGCFreeRegions(ISOSMemoryEnum **ppEnum);
+    virtual HRESULT STDMETHODCALLTYPE LockedFlush();
 
     //
     // ClrDataAccess.
@@ -1248,17 +1252,6 @@ public:
         /* [out] */ TADDR* outAddr,
         /* [out] */ union STUB_BUF* outBuffer,
         /* [out] */ ULONG32* outFlags);
-
-    DebuggerJitInfo* GetDebuggerJitInfo(MethodDesc* methodDesc,
-                                        TADDR addr)
-    {
-        if (g_pDebugger)
-        {
-            return g_pDebugger->GetJitInfo(methodDesc, (PBYTE)addr, NULL);
-        }
-
-        return NULL;
-    }
 
     HRESULT GetMethodExtents(MethodDesc* methodDesc,
                              METH_EXTENTS** extents);
@@ -1954,6 +1947,56 @@ class DacReferenceList
         unsigned int _capacity;
 };
 
+
+class DacMemoryEnumerator : public DefaultCOMImpl<ISOSMemoryEnum, IID_ISOSMemoryEnum>
+{
+public:
+    DacMemoryEnumerator()
+        : mIteratorIndex(0)
+    {
+    }
+
+    virtual ~DacMemoryEnumerator() {}
+    virtual HRESULT Init() = 0;
+    
+    HRESULT STDMETHODCALLTYPE Skip(unsigned int count);
+    HRESULT STDMETHODCALLTYPE Reset();
+    HRESULT STDMETHODCALLTYPE GetCount(unsigned int *pCount);
+    HRESULT STDMETHODCALLTYPE Next(unsigned int count,
+                                   SOSMemoryRegion regions[],
+                                   unsigned int *pFetched);
+
+protected:
+    DacReferenceList<SOSMemoryRegion> mRegions;
+
+private:
+    unsigned int mIteratorIndex;
+};
+
+class DacHandleTableMemoryEnumerator : public DacMemoryEnumerator
+{
+public:
+    virtual HRESULT Init();
+};
+
+class DacGCBookkeepingEnumerator : public DacMemoryEnumerator
+{
+public:
+    virtual HRESULT Init();
+};
+
+class DacFreeRegionEnumerator : public DacMemoryEnumerator
+{
+public:
+    virtual HRESULT Init();
+
+private:
+    void AddSingleSegment(const dac_heap_segment &seg, FreeRegionKind kind, int heap);
+    void AddSegmentList(DPTR(dac_heap_segment) seg, FreeRegionKind kind, int heap = 0);
+    void AddFreeList(DPTR(dac_region_free_list) freeList, FreeRegionKind kind);
+    void AddServerRegions();
+};
+
 struct DacGcReference;
  /* DacStackReferenceWalker.
  */
@@ -2074,7 +2117,7 @@ private:
     void WalkHandles();
     static inline bool IsAlwaysStrongReference(unsigned int type)
     {
-        return type == HNDTYPE_STRONG || type == HNDTYPE_PINNED || type == HNDTYPE_ASYNCPINNED || type == HNDTYPE_SIZEDREF;
+        return type == HNDTYPE_STRONG || type == HNDTYPE_PINNED || type == HNDTYPE_SIZEDREF;
     }
 
 private:

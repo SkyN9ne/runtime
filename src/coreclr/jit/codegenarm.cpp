@@ -123,19 +123,19 @@ BasicBlock* CodeGen::genCallFinally(BasicBlock* block)
     // we would have otherwise created retless calls.
     assert(block->isBBCallAlwaysPair());
 
-    assert(block->bbNext != NULL);
-    assert(block->bbNext->bbJumpKind == BBJ_ALWAYS);
-    assert(block->bbNext->bbJumpDest != NULL);
-    assert(block->bbNext->bbJumpDest->bbFlags & BBF_FINALLY_TARGET);
+    assert(!block->IsLast());
+    assert(block->Next()->KindIs(BBJ_ALWAYS));
+    assert(!block->Next()->HasJumpTo(nullptr));
+    assert(block->Next()->GetJumpDest()->bbFlags & BBF_FINALLY_TARGET);
 
-    bbFinallyRet = block->bbNext->bbJumpDest;
+    bbFinallyRet = block->Next()->GetJumpDest();
 
     // Load the address where the finally funclet should return into LR.
     // The funclet prolog/epilog will do "push {lr}" / "pop {pc}" to do the return.
     genMov32RelocatableDisplacement(bbFinallyRet, REG_LR);
 
     // Jump to the finally BB
-    inst_JMP(EJ_jmp, block->bbJumpDest);
+    inst_JMP(EJ_jmp, block->GetJumpDest());
 
     // The BBJ_ALWAYS is used because the BBJ_CALLFINALLY can't point to the
     // jump target using bbJumpDest - that is already used to point
@@ -143,14 +143,14 @@ BasicBlock* CodeGen::genCallFinally(BasicBlock* block)
     // block is RETLESS.
     assert(!(block->bbFlags & BBF_RETLESS_CALL));
     assert(block->isBBCallAlwaysPair());
-    return block->bbNext;
+    return block->Next();
 }
 
 //------------------------------------------------------------------------
 // genEHCatchRet:
 void CodeGen::genEHCatchRet(BasicBlock* block)
 {
-    genMov32RelocatableDisplacement(block->bbJumpDest, REG_INTRET);
+    genMov32RelocatableDisplacement(block->GetJumpDest(), REG_INTRET);
 }
 
 //------------------------------------------------------------------------
@@ -630,11 +630,11 @@ void CodeGen::genTableBasedSwitch(GenTree* treeNode)
 //
 void CodeGen::genJumpTable(GenTree* treeNode)
 {
-    noway_assert(compiler->compCurBB->bbJumpKind == BBJ_SWITCH);
+    noway_assert(compiler->compCurBB->KindIs(BBJ_SWITCH));
     assert(treeNode->OperGet() == GT_JMPTABLE);
 
-    unsigned     jumpCount = compiler->compCurBB->bbJumpSwt->bbsCount;
-    BasicBlock** jumpTable = compiler->compCurBB->bbJumpSwt->bbsDstTab;
+    unsigned     jumpCount = compiler->compCurBB->GetJumpSwt()->bbsCount;
+    BasicBlock** jumpTable = compiler->compCurBB->GetJumpSwt()->bbsDstTab;
     unsigned     jmpTabBase;
 
     jmpTabBase = GetEmitter()->emitBBTableDataGenBeg(jumpCount, false);
@@ -1082,6 +1082,8 @@ void CodeGen::genCodeForStoreLclVar(GenTreeLclVar* tree)
         LclVarDsc* varDsc     = compiler->lvaGetDesc(varNum);
         var_types  targetType = varDsc->GetRegisterType(tree);
 
+        emitter* emit = GetEmitter();
+
         if (targetType == TYP_LONG)
         {
             genStoreLongLclVar(tree);
@@ -1114,13 +1116,23 @@ void CodeGen::genCodeForStoreLclVar(GenTreeLclVar* tree)
                 instruction ins  = ins_StoreFromSrc(dataReg, targetType);
                 emitAttr    attr = emitTypeSize(targetType);
 
-                emitter* emit = GetEmitter();
                 emit->emitIns_S_R(ins, attr, dataReg, varNum, /* offset */ 0);
             }
             else // store into register (i.e move into register)
             {
                 // Assign into targetReg when dataReg (from op1) is not the same register
-                inst_Mov(targetType, targetReg, dataReg, /* canSkip */ true);
+                // Only zero/sign extend if we are using general registers.
+                if (varTypeIsIntegral(targetType) && emit->isGeneralRegister(targetReg) &&
+                    emit->isGeneralRegister(dataReg))
+                {
+                    // We use 'emitActualTypeSize' as the instructions require 4BYTE.
+                    inst_Mov_Extend(targetType, /* srcInReg */ true, targetReg, dataReg, /* canSkip */ true,
+                                    emitActualTypeSize(targetType));
+                }
+                else
+                {
+                    inst_Mov(targetType, targetReg, dataReg, /* canSkip */ true);
+                }
             }
 
             genUpdateLifeStore(tree, targetReg, varDsc);
@@ -1282,12 +1294,12 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
 //
 void CodeGen::genCodeForJTrue(GenTreeOp* jtrue)
 {
-    assert(compiler->compCurBB->bbJumpKind == BBJ_COND);
+    assert(compiler->compCurBB->KindIs(BBJ_COND));
 
     GenTree*  op  = jtrue->gtGetOp1();
     regNumber reg = genConsumeReg(op);
     inst_RV_RV(INS_tst, reg, reg, genActualType(op));
-    inst_JMP(EJ_ne, compiler->compCurBB->bbJumpDest);
+    inst_JMP(EJ_ne, compiler->compCurBB->GetJumpDest());
 }
 
 //------------------------------------------------------------------------

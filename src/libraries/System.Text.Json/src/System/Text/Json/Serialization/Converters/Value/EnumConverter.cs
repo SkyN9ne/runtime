@@ -5,6 +5,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 
 namespace System.Text.Json.Serialization.Converters
@@ -64,8 +65,8 @@ namespace System.Text.Json.Serialization.Converters
             string[] names = Enum.GetNames<T>();
             T[] values = Enum.GetValues<T>();
 #else
-            string[] names = Enum.GetNames(TypeToConvert);
-            Array values = Enum.GetValues(TypeToConvert);
+            string[] names = Enum.GetNames(Type);
+            Array values = Enum.GetValues(Type);
 #endif
             Debug.Assert(names.Length == values.Length);
 
@@ -93,28 +94,28 @@ namespace System.Text.Json.Serialization.Converters
             }
         }
 
-#pragma warning disable 8500 // address of managed types
-        public override unsafe T Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        public override T Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
             JsonTokenType token = reader.TokenType;
 
             if (token == JsonTokenType.String)
             {
-                if (!_converterOptions.HasFlag(EnumConverterOptions.AllowStrings))
+                if ((_converterOptions & EnumConverterOptions.AllowStrings) == 0)
                 {
                     ThrowHelper.ThrowJsonException();
                     return default;
                 }
 
 #if NETCOREAPP
-                if (TryParseEnumCore(ref reader, options, out T value))
+                if (TryParseEnumCore(ref reader, out T value))
 #else
                 string? enumString = reader.GetString();
-                if (TryParseEnumCore(enumString, options, out T value))
+                if (TryParseEnumCore(enumString, out T value))
 #endif
                 {
                     return value;
                 }
+
 #if NETCOREAPP
                 return ReadEnumUsingNamingPolicy(reader.GetString());
 #else
@@ -122,7 +123,7 @@ namespace System.Text.Json.Serialization.Converters
 #endif
             }
 
-            if (token != JsonTokenType.Number || !_converterOptions.HasFlag(EnumConverterOptions.AllowNumbers))
+            if (token != JsonTokenType.Number || (_converterOptions & EnumConverterOptions.AllowNumbers) == 0)
             {
                 ThrowHelper.ThrowJsonException();
                 return default;
@@ -135,49 +136,51 @@ namespace System.Text.Json.Serialization.Converters
                 case TypeCode.Int32:
                     if (reader.TryGetInt32(out int int32))
                     {
-                        return *(T*)&int32;
+                        // Use Unsafe.As instead of raw pointers for .NET Standard support.
+                        // https://github.com/dotnet/runtime/issues/84895
+                        return Unsafe.As<int, T>(ref int32);
                     }
                     break;
                 case TypeCode.UInt32:
                     if (reader.TryGetUInt32(out uint uint32))
                     {
-                        return *(T*)&uint32;
+                        return Unsafe.As<uint, T>(ref uint32);
                     }
                     break;
                 case TypeCode.UInt64:
                     if (reader.TryGetUInt64(out ulong uint64))
                     {
-                        return *(T*)&uint64;
+                        return Unsafe.As<ulong, T>(ref uint64);
                     }
                     break;
                 case TypeCode.Int64:
                     if (reader.TryGetInt64(out long int64))
                     {
-                        return *(T*)&int64;
+                        return Unsafe.As<long, T>(ref int64);
                     }
                     break;
                 case TypeCode.SByte:
                     if (reader.TryGetSByte(out sbyte byte8))
                     {
-                        return *(T*)&byte8;
+                        return Unsafe.As<sbyte, T>(ref byte8);
                     }
                     break;
                 case TypeCode.Byte:
                     if (reader.TryGetByte(out byte ubyte8))
                     {
-                        return *(T*)&ubyte8;
+                        return Unsafe.As<byte, T>(ref ubyte8);
                     }
                     break;
                 case TypeCode.Int16:
                     if (reader.TryGetInt16(out short int16))
                     {
-                        return *(T*)&int16;
+                        return Unsafe.As<short, T>(ref int16);
                     }
                     break;
                 case TypeCode.UInt16:
                     if (reader.TryGetUInt16(out ushort uint16))
                     {
-                        return *(T*)&uint16;
+                        return Unsafe.As<ushort, T>(ref uint16);
                     }
                     break;
             }
@@ -186,10 +189,10 @@ namespace System.Text.Json.Serialization.Converters
             return default;
         }
 
-        public override unsafe void Write(Utf8JsonWriter writer, T value, JsonSerializerOptions options)
+        public override void Write(Utf8JsonWriter writer, T value, JsonSerializerOptions options)
         {
             // If strings are allowed, attempt to write it out as a string value
-            if (_converterOptions.HasFlag(EnumConverterOptions.AllowStrings))
+            if ((_converterOptions & EnumConverterOptions.AllowStrings) != 0)
             {
                 ulong key = ConvertToUInt64(value);
 
@@ -226,7 +229,7 @@ namespace System.Text.Json.Serialization.Converters
                 }
             }
 
-            if (!_converterOptions.HasFlag(EnumConverterOptions.AllowNumbers))
+            if ((_converterOptions & EnumConverterOptions.AllowNumbers) == 0)
             {
                 ThrowHelper.ThrowJsonException();
             }
@@ -234,42 +237,43 @@ namespace System.Text.Json.Serialization.Converters
             switch (s_enumTypeCode)
             {
                 case TypeCode.Int32:
-                    writer.WriteNumberValue(*(int*)&value);
+                    // Use Unsafe.As instead of raw pointers for .NET Standard support.
+                    // https://github.com/dotnet/runtime/issues/84895
+                    writer.WriteNumberValue(Unsafe.As<T, int>(ref value));
                     break;
                 case TypeCode.UInt32:
-                    writer.WriteNumberValue(*(uint*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, uint>(ref value));
                     break;
                 case TypeCode.UInt64:
-                    writer.WriteNumberValue(*(ulong*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, ulong>(ref value));
                     break;
                 case TypeCode.Int64:
-                    writer.WriteNumberValue(*(long*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, long>(ref value));
                     break;
                 case TypeCode.Int16:
-                    writer.WriteNumberValue(*(short*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, short>(ref value));
                     break;
                 case TypeCode.UInt16:
-                    writer.WriteNumberValue(*(ushort*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, ushort>(ref value));
                     break;
                 case TypeCode.Byte:
-                    writer.WriteNumberValue(*(byte*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, byte>(ref value));
                     break;
                 case TypeCode.SByte:
-                    writer.WriteNumberValue(*(sbyte*)&value);
+                    writer.WriteNumberValue(Unsafe.As<T, sbyte>(ref value));
                     break;
                 default:
                     ThrowHelper.ThrowJsonException();
                     break;
             }
         }
-#pragma warning restore 8500
 
         internal override T ReadAsPropertyNameCore(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
 #if NETCOREAPP
-            bool success = TryParseEnumCore(ref reader, options, out T value);
+            bool success = TryParseEnumCore(ref reader, out T value);
 #else
-            bool success = TryParseEnumCore(reader.GetString(), options, out T value);
+            bool success = TryParseEnumCore(reader.GetString(), out T value);
 #endif
 
             if (!success)
@@ -280,7 +284,7 @@ namespace System.Text.Json.Serialization.Converters
             return value;
         }
 
-        internal override unsafe void WriteAsPropertyNameCore(Utf8JsonWriter writer, T value, JsonSerializerOptions options, bool isWritingExtensionDataProperty)
+        internal override void WriteAsPropertyNameCore(Utf8JsonWriter writer, T value, JsonSerializerOptions options, bool isWritingExtensionDataProperty)
         {
             ulong key = ConvertToUInt64(value);
 
@@ -319,43 +323,50 @@ namespace System.Text.Json.Serialization.Converters
                 return;
             }
 
-#pragma warning disable 8500 // address of managed type
             switch (s_enumTypeCode)
             {
+                // Use Unsafe.As instead of raw pointers for .NET Standard support.
+                // https://github.com/dotnet/runtime/issues/84895
+
                 case TypeCode.Int32:
-                    writer.WritePropertyName(*(int*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, int>(ref value));
                     break;
                 case TypeCode.UInt32:
-                    writer.WritePropertyName(*(uint*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, uint>(ref value));
                     break;
                 case TypeCode.UInt64:
-                    writer.WritePropertyName(*(ulong*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, ulong>(ref value));
                     break;
                 case TypeCode.Int64:
-                    writer.WritePropertyName(*(long*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, long>(ref value));
                     break;
                 case TypeCode.Int16:
-                    writer.WritePropertyName(*(short*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, short>(ref value));
                     break;
                 case TypeCode.UInt16:
-                    writer.WritePropertyName(*(ushort*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, ushort>(ref value));
                     break;
                 case TypeCode.Byte:
-                    writer.WritePropertyName(*(byte*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, byte>(ref value));
                     break;
                 case TypeCode.SByte:
-                    writer.WritePropertyName(*(sbyte*)&value);
+                    writer.WritePropertyName(Unsafe.As<T, sbyte>(ref value));
                     break;
                 default:
                     ThrowHelper.ThrowJsonException();
                     break;
             }
-#pragma warning restore 8500
         }
 
+        private bool TryParseEnumCore(
 #if NETCOREAPP
-        private static bool TryParseEnumCore(ref Utf8JsonReader reader, JsonSerializerOptions options, out T value)
+            ref Utf8JsonReader reader,
+#else
+            string? source,
+#endif
+            out T value)
         {
+#if NETCOREAPP
             char[]? rentedBuffer = null;
             int bufferLength = reader.ValueLength;
 
@@ -365,28 +376,29 @@ namespace System.Text.Json.Serialization.Converters
 
             int charsWritten = reader.CopyString(charBuffer);
             ReadOnlySpan<char> source = charBuffer.Slice(0, charsWritten);
+#endif
 
-            // Try parsing case sensitive first
-            bool success = Enum.TryParse(source, out T result) || Enum.TryParse(source, ignoreCase: true, out result);
+            bool success;
+            if ((_converterOptions & EnumConverterOptions.AllowNumbers) != 0 || !JsonHelpers.IntegerRegex.IsMatch(source))
+            {
+                // Try parsing case sensitive first
+                success = Enum.TryParse(source, out value) || Enum.TryParse(source, ignoreCase: true, out value);
+            }
+            else
+            {
+                success = false;
+                value = default;
+            }
 
+#if NETCOREAPP
             if (rentedBuffer != null)
             {
                 charBuffer.Slice(0, charsWritten).Clear();
                 ArrayPool<char>.Shared.Return(rentedBuffer);
             }
-
-            value = result;
-            return success;
-        }
-#else
-        private static bool TryParseEnumCore(string? enumString, JsonSerializerOptions _, out T value)
-        {
-            // Try parsing case sensitive first
-            bool success = Enum.TryParse(enumString, out T result) || Enum.TryParse(enumString, ignoreCase: true, out result);
-            value = result;
-            return success;
-        }
 #endif
+            return success;
+        }
 
         private T ReadEnumUsingNamingPolicy(string? enumString)
         {
